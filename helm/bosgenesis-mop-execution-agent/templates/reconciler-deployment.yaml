@@ -1,0 +1,52 @@
+{{- if .Values.reconciler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bosgenesis-mop-execution-agent.fullname" . }}-reconciler
+  labels:
+    {{- include "bosgenesis-mop-execution-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reconciler
+spec:
+  replicas: {{ .Values.reconciler.replicas }}
+  selector:
+    matchLabels:
+      {{- include "bosgenesis-mop-execution-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: reconciler
+  template:
+    metadata:
+      labels:
+        {{- include "bosgenesis-mop-execution-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: reconciler
+    spec:
+      serviceAccountName: {{ include "bosgenesis-mop-execution-agent.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: reconciler
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - bosgenesis_mop_execution_agent.entrypoints.reconciler_main
+          envFrom:
+            - configMapRef:
+                name: {{ include "bosgenesis-mop-execution-agent.fullname" . }}-config
+          env:
+            {{- include "bosgenesis-mop-execution-agent.secretEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.reconciler.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "bosgenesis-mop-execution-agent.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

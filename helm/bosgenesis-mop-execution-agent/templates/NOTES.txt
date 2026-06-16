@@ -1,0 +1,12 @@
+BOS Genesis MoP Execution Agent
+
+Health check:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "bosgenesis-mop-execution-agent.fullname" . }} 8080:{{ .Values.api.service.port }}
+  curl http://localhost:8080/healthz
+
+Configuration:
+  config map: {{ include "bosgenesis-mop-execution-agent.fullname" . }}-config
+  namespace lock lease seconds: {{ .Values.config.namespaceLockLeaseSeconds }}
+  worker concurrency: {{ .Values.config.workerConcurrency }}
+
+Dry-run job support becomes executable after the Phase 8 dry-run runtime is implemented.

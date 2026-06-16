@@ -26,28 +26,28 @@ Goal: establish a clean, testable repository aligned to the specs. Requirement c
 
 Goal: define domain objects and deterministic transitions before execution. Requirement coverage: `[FR-001] [FR-002] [FR-025] [FR-028] [NFR-001] [NFR-002] [AC-021]`.
 
-- [ ] [FR-001][FR-002] Implement Pydantic API/domain models for jobs, phases, steps, observations, instructions, approvals, audit events, reports, resources, and policy blocks.
-- [ ] [FR-002][NFR-002] Implement job state enum from OpenAPI/MCP contract.
-- [ ] [FR-002][NFR-002] Implement step state enum from `SPECS.md`.
-- [ ] [NFR-002] Implement the state transition table and transition guard hooks.
-- [ ] [FR-028] Ensure every state change can emit an observation and audit event.
-- [ ] [NFR-013] Add correlation ID and trace ID fields across persisted and API models.
-- [ ] [NFR-008] Add deterministic error codes and problem detail mapping.
-- [ ] [NFR-002][AC-021] Add tests for allowed transitions, blocked transitions, restart-loadable state, and auditable state changes.
+- [x] [FR-001][FR-002] Implement Pydantic API/domain models for jobs, phases, steps, observations, instructions, approvals, audit events, reports, resources, and policy blocks.
+- [x] [FR-002][NFR-002] Implement job state enum from OpenAPI/MCP contract.
+- [x] [FR-002][NFR-002] Implement step state enum from `SPECS.md`.
+- [x] [NFR-002] Implement the state transition table and transition guard hooks.
+- [x] [FR-028] Ensure every state change can emit an observation and audit event.
+- [x] [NFR-013] Add correlation ID and trace ID fields across persisted and API models.
+- [x] [NFR-008] Add deterministic error codes and problem detail mapping.
+- [x] [NFR-002][AC-021] Add tests for allowed transitions, blocked transitions, restart-loadable state, and auditable state changes.
 
 ## Phase 2 - Persistence and Queuing
 
 Goal: make jobs durable, idempotent, and restart-safe. Requirement coverage: `[FR-025] [FR-026] [FR-030] [FR-031] [NFR-001] [NFR-003] [NFR-006] [NFR-013]`.
 
-- [ ] [FR-025] Create PostgreSQL migrations for execution jobs, phases, steps, observations, instructions, approvals, audit events, idempotency keys, namespace locks, and report artifacts.
-- [ ] [FR-025] Implement repository layer for durable job, phase, step, observation, instruction, approval, and report records.
-- [ ] [FR-026][NFR-003] Implement append-only audit writer.
-- [ ] [FR-030] Implement idempotency key storage and replay behavior.
-- [ ] [FR-031][NFR-006] Implement Redis lease, heartbeat, and target namespace distributed lock.
-- [ ] [NFR-001] Implement restart/resume persistence behavior.
-- [ ] [FR-031][AC-024] Add namespace lock contention tests.
-- [ ] [FR-030] Add idempotent job creation and duplicate mutation request tests.
-- [ ] [FR-026][AC-022] Add audit append-only tests.
+- [x] [FR-025] Create PostgreSQL migrations for execution jobs, phases, steps, observations, instructions, approvals, audit events, idempotency keys, namespace locks, and report artifacts.
+- [x] [FR-025] Implement repository layer for durable job, phase, step, observation, instruction, approval, and report records.
+- [x] [FR-026][NFR-003] Implement append-only audit writer.
+- [x] [FR-030] Implement idempotency key storage and replay behavior.
+- [x] [FR-031][NFR-006] Implement Redis lease, heartbeat, and target namespace distributed lock.
+- [x] [NFR-001] Implement restart/resume persistence behavior.
+- [x] [FR-031][AC-024] Add namespace lock contention tests.
+- [x] [FR-030] Add idempotent job creation and duplicate mutation request tests.
+- [x] [FR-026][AC-022] Add audit append-only tests.
 
 ## Phase 3 - Artifact Bundle Reader and Validator
 
@@ -210,13 +210,13 @@ Goal: make the service production-operable. Requirement coverage: `[NFR-009] [NF
 
 Goal: package the service for deployment. Requirement coverage: `[NFR-012] [NFR-006]`.
 
-- [ ] [NFR-012] Finalize Dockerfile and runtime entrypoints.
-- [ ] [NFR-006] Create Helm chart or Kubernetes manifests.
-- [ ] [NFR-012] Define config map, secret references, environment variables, request limits, job limits, and policy configuration.
-- [ ] [NFR-006] Define service account, RBAC, network policy recommendations, resource requests/limits, and horizontal scaling guidance.
-- [ ] [NFR-006] Define worker concurrency and namespace lock behavior.
-- [ ] [FR-025] Define database migration job.
-- [ ] [NFR-012] Add deployment runbook, rollback runbook, and sample requests.
+- [x] [NFR-012] Finalize Dockerfile and runtime entrypoints.
+- [x] [NFR-006] Create Helm chart or Kubernetes manifests.
+- [x] [NFR-012] Define config map, secret references, environment variables, request limits, job limits, and policy configuration.
+- [x] [NFR-006] Define service account, RBAC, network policy recommendations, resource requests/limits, and horizontal scaling guidance.
+- [x] [NFR-006] Define worker concurrency and namespace lock behavior.
+- [x] [FR-025] Define database migration job.
+- [x] [NFR-012] Add deployment runbook, rollback runbook, and sample requests.
 - [ ] [FR-040] Verify deployed service can run a sample dry-run job.
 
 ## Phase 15 - Release Candidate Hardening

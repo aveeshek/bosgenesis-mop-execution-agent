@@ -31,6 +31,11 @@ dev = [
   "mypy>=1.18.0",
 ]
 
+[project.scripts]
+bosgenesis-mop-execution-api = "bosgenesis_mop_execution_agent.entrypoints.api_main:main"
+bosgenesis-mop-execution-worker = "bosgenesis_mop_execution_agent.entrypoints.worker_main:main"
+bosgenesis-mop-execution-reconciler = "bosgenesis_mop_execution_agent.entrypoints.reconciler_main:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/bosgenesis_mop_execution_agent"]
 
