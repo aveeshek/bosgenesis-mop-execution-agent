@@ -1,0 +1,250 @@
+{
+  "schema_version": "0.1.0",
+  "server_name": "bosgenesis-mop-execution-agent",
+  "alternative_name": "bosgenesis-k8s-mop-installer-agent",
+  "authority_model": {
+    "worker_agent_reasoning_authority": false,
+    "external_llm_controller_reasoning_authority": true,
+    "human_approver_authority": "authorization_only",
+    "memory_authority": "context_only_not_decision_authority",
+    "guardrails_override_all_inputs": true
+  },
+  "standard_result_envelope": {
+    "type": "object",
+    "required": [
+      "ok",
+      "message",
+      "data",
+      "redaction_applied"
+    ],
+    "properties": {
+      "ok": {
+        "type": "boolean"
+      },
+      "correlation_id": {
+        "type": "string"
+      },
+      "job_id": {
+        "type": "string"
+      },
+      "bundle_id": {
+        "type": "string"
+      },
+      "state": {
+        "type": "string"
+      },
+      "message": {
+        "type": "string"
+      },
+      "data": {
+        "type": "object"
+      },
+      "observations": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "policy_blocks": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "next_required_decision": {
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "redaction_applied": {
+        "type": "boolean"
+      },
+      "next_poll_after_seconds": {
+        "type": "integer"
+      }
+    }
+  },
+  "job_states": [
+    "created",
+    "validating_bundle",
+    "invalid_bundle",
+    "awaiting_human_approval",
+    "dry_run_ready",
+    "dry_running",
+    "awaiting_llm_instruction",
+    "executing",
+    "decision_required",
+    "paused",
+    "wait_scheduled",
+    "validation_running",
+    "rollback_requested",
+    "rolling_back",
+    "completed",
+    "failed",
+    "cancelled"
+  ],
+  "instruction_types": [
+    "continue",
+    "retry",
+    "wait",
+    "skip",
+    "patch_manifest",
+    "replace_manifest",
+    "run_validation",
+    "request_human_approval",
+    "rollback",
+    "abort",
+    "refresh_observation",
+    "invoke_mcp_tool"
+  ],
+  "guardrail_codes": [
+    "TARGET_NAMESPACE_VIOLATION",
+    "CLUSTER_SCOPED_RESOURCE_BLOCKED",
+    "SECRET_VALUE_DETECTED",
+    "PRODUCTION_DATA_COPY_BLOCKED",
+    "DRY_RUN_REQUIRED",
+    "HUMAN_APPROVAL_REQUIRED",
+    "IDEMPOTENCY_LOCK_CONFLICT",
+    "LLM_REASONING_REQUIRED",
+    "TIMEOUT_EXCEEDED"
+  ],
+  "tools": [
+    {
+      "name": "mop_execution_health",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_get_capabilities",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_register_bundle",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_validate_bundle",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_create_job",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_get_job",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_list_jobs",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_start_job",
+      "mutating": "may_call_mutating_downstream_only_after_gates",
+      "requires_external_llm_instruction": "when_continuing_after_decision_required",
+      "requires_human_approval": "before_mutation"
+    },
+    {
+      "name": "mop_execution_pause_job",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_resume_job",
+      "mutating": "may_continue_existing_allowed_work",
+      "requires_external_llm_instruction": "when_reasoning_required",
+      "requires_human_approval": "before_mutation"
+    },
+    {
+      "name": "mop_execution_cancel_job",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_submit_instruction",
+      "mutating": "depends_on_instruction",
+      "requires_external_llm_instruction": true,
+      "requires_human_approval": "before_mutation_or_rollback"
+    },
+    {
+      "name": "mop_execution_submit_approval",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_get_plan",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_get_next_required_decision",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_list_observations",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_list_audit_events",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_get_memory_context",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_evaluate_policy",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    },
+    {
+      "name": "mop_execution_request_rollback",
+      "mutating": true,
+      "requires_external_llm_instruction": true,
+      "requires_human_approval": true
+    },
+    {
+      "name": "mop_execution_generate_release_notes",
+      "mutating": false,
+      "requires_external_llm_instruction": false,
+      "requires_human_approval": false
+    }
+  ],
+  "resources": [
+    "mop-execution://capabilities",
+    "mop-execution://bundles/{bundle_id}",
+    "mop-execution://jobs/{job_id}",
+    "mop-execution://jobs/{job_id}/plan",
+    "mop-execution://jobs/{job_id}/observations",
+    "mop-execution://jobs/{job_id}/audit",
+    "mop-execution://jobs/{job_id}/memory-context",
+    "mop-execution://jobs/{job_id}/reports"
+  ]
+}

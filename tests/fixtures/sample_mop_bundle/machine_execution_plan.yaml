@@ -1,0 +1,34 @@
+schema_version: "0.1.0"
+target_namespace: sample-target
+executor_contract:
+  parse_this_block_first: true
+  dry_run_before_mutation: true
+  human_approval_before_mutation: true
+  never_copy_secret_values: true
+  target_namespace_only: true
+dependency_graph:
+  - phase_id: apply_configmaps
+    depends_on: []
+phases:
+  - phase_id: apply_configmaps
+    title: Apply sample ConfigMaps
+    objective: Apply a sanitized sample ConfigMap to the target namespace.
+    depends_on: []
+    steps:
+      - step_id: apply-sample-configmap
+        title: Apply sample ConfigMap
+        type: k8s_apply
+        depends_on: []
+        manifest_refs:
+          - generated/configmap-sample-app.yaml
+        commands:
+          - kind: dry_run
+            command: k8s.server_side_dry_run_apply generated/configmap-sample-app.yaml
+            dry_run: true
+            mutating: false
+          - kind: apply
+            command: k8s.apply generated/configmap-sample-app.yaml
+            dry_run: false
+            mutating: true
+        expected_outcomes:
+          - ConfigMap sample-app-config exists in sample-target.

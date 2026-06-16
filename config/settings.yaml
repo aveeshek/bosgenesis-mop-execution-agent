@@ -1,0 +1,21 @@
+service:
+  name: bosgenesis-mop-execution-agent
+  environment: dev
+  api_base_path: /v1
+
+policy:
+  profile: namespace-only-v1
+  target_namespace_only: true
+  dry_run_before_mutation: true
+  human_approval_before_mutation: true
+  no_secret_values: true
+  no_production_data: true
+
+storage:
+  artifact_root: ./.data/mop-execution
+
+execution:
+  max_job_duration_seconds: 14400
+  default_step_timeout_seconds: 600
+  default_wait_poll_interval_seconds: 15
+  max_parallel_jobs_per_namespace: 1

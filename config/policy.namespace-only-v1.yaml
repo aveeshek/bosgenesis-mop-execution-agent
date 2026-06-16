@@ -1,0 +1,10 @@
+profile: namespace-only-v1
+target_namespace_only: true
+allow_cluster_scoped_resources: false
+allow_secret_value_copy: false
+allow_production_data_copy: false
+require_dry_run_before_mutation: true
+require_human_approval_before_mutation: true
+allow_namespace_create: false
+allow_pvc_delete: false
+allow_force_apply: false

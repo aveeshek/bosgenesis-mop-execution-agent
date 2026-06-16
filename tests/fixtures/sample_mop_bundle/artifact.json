@@ -1,0 +1,8 @@
+{
+  "mop_id": "sample-mop",
+  "run_id": "sample-run",
+  "source_namespace": "sample-source",
+  "target_namespace": "sample-target",
+  "warnings": [],
+  "secret_values_present": false
+}

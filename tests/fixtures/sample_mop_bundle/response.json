@@ -1,0 +1,6 @@
+{
+  "status": "succeeded",
+  "mop_id": "sample-mop",
+  "run_id": "sample-run",
+  "artifact_root": "tests/fixtures/sample_mop_bundle"
+}

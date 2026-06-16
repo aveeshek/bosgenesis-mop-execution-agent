@@ -1,0 +1,1 @@
+"""Common result envelope placeholders."""

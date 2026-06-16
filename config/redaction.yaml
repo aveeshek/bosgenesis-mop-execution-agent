@@ -1,0 +1,13 @@
+enabled: true
+sensitive_key_patterns:
+  - password
+  - passwd
+  - pwd
+  - token
+  - api_key
+  - apikey
+  - secret
+  - client_secret
+  - authorization
+  - cookie
+  - private_key

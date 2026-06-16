@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bosgenesis-mop-execution-agent"
+version = "0.1.0"
+description = "Deterministic MoP execution worker for BOS Genesis Kubernetes and Helm artifact bundles."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.10.0",
+  "sqlalchemy>=2.0.0",
+  "asyncpg>=0.30.0",
+  "redis>=6.0.0",
+  "httpx>=0.28.0",
+  "opentelemetry-api>=1.35.0",
+  "opentelemetry-sdk>=1.35.0",
+  "opentelemetry-instrumentation-fastapi>=0.56b0",
+  "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0.0",
+  "pytest-asyncio>=1.0.0",
+  "ruff>=0.15.0",
+  "mypy>=1.18.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bosgenesis_mop_execution_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["bosgenesis_mop_execution_agent"]
+
+[[tool.mypy.overrides]]
+module = ["fastapi.*"]
+ignore_missing_imports = true

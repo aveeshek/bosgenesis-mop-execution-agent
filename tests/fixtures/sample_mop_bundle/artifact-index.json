@@ -1,0 +1,10 @@
+{
+  "files": [
+    {"path": "machine_execution_plan.yaml", "role": "machine_execution_plan"},
+    {"path": "human-readable-mop.md", "role": "human_mop_markdown"},
+    {"path": "machine-readable-installation-notes.md", "role": "installation_notes"},
+    {"path": "generated/configmap-sample-app.yaml", "role": "generated_manifest"},
+    {"path": "artifact.json", "role": "artifact_manifest"},
+    {"path": "response.json", "role": "response"}
+  ]
+}

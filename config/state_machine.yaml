@@ -1,0 +1,18 @@
+job_states:
+  - created
+  - validating_bundle
+  - invalid_bundle
+  - awaiting_human_approval
+  - dry_run_ready
+  - dry_running
+  - awaiting_llm_instruction
+  - executing
+  - decision_required
+  - paused
+  - wait_scheduled
+  - validation_running
+  - rollback_requested
+  - rolling_back
+  - completed
+  - failed
+  - cancelled

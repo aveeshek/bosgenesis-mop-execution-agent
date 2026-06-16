@@ -1,0 +1,6 @@
+schema_version: "0.1.0"
+description: Placeholder for the versioned machine execution plan schema.
+required:
+  - schema_version
+  - target_namespace
+  - phases

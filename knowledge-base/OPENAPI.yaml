@@ -1,0 +1,1463 @@
+openapi: 3.1.0
+info:
+  title: BOS Genesis MoP Execution Agent API
+  version: 0.1.0
+  summary: Async, externally controlled execution API for Kubernetes/Helm MoP artifact bundles.
+  description: |
+    REST contract for `bosgenesis-mop-execution-agent`, also known as
+    `bosgenesis-k8s-mop-installer-agent`.
+
+    The agent is a deterministic, policy-enforcing worker. It consumes a MoP
+    Creation Agent artifact bundle, parses `machine_execution_plan.yaml` first,
+    reads generated Kubernetes YAML and Helm values, performs dry-runs and
+    mutations through governed MCP servers, records observations, and pauses
+    whenever external LLM reasoning or human approval is required.
+
+    Non-negotiable authority model:
+      - The worker has no autonomous remediation/reasoning authority.
+      - The external LLM controller provides next-action decisions.
+      - A human approver authorizes mutating, destructive, rollback, and policy-exception actions.
+      - Guardrails override every instruction, approval, request, and memory record.
+
+    Memory is execution memory only. It supports continuity, auditability, recall,
+    and context packaging for the external LLM. Memory is not decision authority.
+  contact:
+    name: BOS Genesis Platform
+  license:
+    name: Internal
+servers:
+  - url: https://mop-execution-agent.example.internal
+    description: Production placeholder
+  - url: http://localhost:8080
+    description: Local development
+security:
+  - BearerAuth: []
+tags:
+  - name: Health
+    description: Liveness, readiness, and capability inspection.
+  - name: Artifact Bundles
+    description: Register, upload, inspect, and validate MoP artifact bundles.
+  - name: Execution Jobs
+    description: Create and control long-running execution jobs.
+  - name: Instructions
+    description: External LLM instructions and human approvals.
+  - name: Observations
+    description: Facts, state, events, audit logs, and memory context.
+  - name: Policy
+    description: Deterministic guardrail evaluation.
+  - name: Reports
+    description: Execution reports, validation summaries, rollback reports, and release notes.
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Liveness check.
+      security: []
+      responses:
+        '200':
+          description: Agent process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: Readiness check.
+      security: []
+      responses:
+        '200':
+          description: Agent is ready for non-mutating work.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Agent is not ready.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+  /v1/capabilities:
+    get:
+      tags: [Health]
+      operationId: getCapabilities
+      summary: Return supported modes, guardrails, MCP adapters, and instruction types.
+      responses:
+        '200':
+          description: Capability document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilitiesResponse'
+  /v1/config/effective:
+    get:
+      tags: [Health]
+      operationId: getEffectiveConfig
+      summary: Return redacted effective runtime configuration.
+      responses:
+        '200':
+          description: Redacted effective configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EffectiveConfigResponse'
+  /v1/artifact-bundles:
+    post:
+      tags: [Artifact Bundles]
+      operationId: registerArtifactBundle
+      summary: Register a MoP artifact bundle by reference.
+      description: |
+        Registers a bundle location or upstream MoP Creation Agent run reference.
+        This endpoint does not execute the bundle. Validation must be performed
+        before job creation or by the job creation flow.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactBundleRegisterRequest'
+      responses:
+        '201':
+          description: Bundle registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactBundleResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+    get:
+      tags: [Artifact Bundles]
+      operationId: listArtifactBundles
+      summary: List registered artifact bundles.
+      parameters:
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+        - name: mop_id
+          in: query
+          schema: { type: string }
+        - name: target_namespace
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Registered bundle page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactBundleListResponse'
+  /v1/artifact-bundles/from-upload:
+    post:
+      tags: [Artifact Bundles]
+      operationId: uploadArtifactBundle
+      summary: Upload a portable MoP artifact archive.
+      description: |
+        Accepts a zip/tar archive containing the MoP Creation Agent output bundle.
+        The server stores it, expands it into controlled storage, and returns a
+        bundle reference. The archive must not contain raw Secret values.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                target_namespace:
+                  type: string
+                expected_mop_id:
+                  type: string
+                uploaded_by:
+                  type: string
+                metadata:
+                  type: string
+                  description: Optional JSON object serialized as a string.
+      responses:
+        '201':
+          description: Bundle uploaded and registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactBundleResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/artifact-bundles/{bundle_id}:
+    get:
+      tags: [Artifact Bundles]
+      operationId: getArtifactBundle
+      summary: Get artifact bundle metadata.
+      parameters:
+        - $ref: '#/components/parameters/BundleIdPath'
+      responses:
+        '200':
+          description: Bundle metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactBundleResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/artifact-bundles/{bundle_id}/validate:
+    post:
+      tags: [Artifact Bundles]
+      operationId: validateArtifactBundle
+      summary: Validate artifact bundle schema, files, redaction, namespace scope, and plan consistency.
+      parameters:
+        - $ref: '#/components/parameters/BundleIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BundleValidationRequest'
+      responses:
+        '200':
+          description: Bundle validation result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BundleValidationResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs:
+    post:
+      tags: [Execution Jobs]
+      operationId: createExecutionJob
+      summary: Create an async MoP execution job.
+      description: |
+        Creates a long-running job. The job parses and validates the bundle,
+        builds an execution graph, writes audit events, and then waits for start,
+        approval, dry-run, or external LLM instruction depending on request mode.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExecutionJobRequest'
+      responses:
+        '202':
+          description: Execution job accepted.
+          headers:
+            Location:
+              description: URL of the created job resource.
+              schema: { type: string, format: uri-reference }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+    get:
+      tags: [Execution Jobs]
+      operationId: listExecutionJobs
+      summary: List execution jobs.
+      parameters:
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+        - name: state
+          in: query
+          schema:
+            $ref: '#/components/schemas/JobState'
+        - name: target_namespace
+          in: query
+          schema: { type: string }
+        - name: correlation_id
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Execution job page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobListResponse'
+  /v1/execution-jobs/{job_id}:
+    get:
+      tags: [Execution Jobs]
+      operationId: getExecutionJob
+      summary: Get current job status and summary.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+      responses:
+        '200':
+          description: Execution job status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/start:
+    post:
+      tags: [Execution Jobs]
+      operationId: startExecutionJob
+      summary: Start or continue a validated job until the next pause condition.
+      description: |
+        Starts deterministic execution. The worker may perform validation and
+        dry-run operations as allowed by policy. It must pause before mutation
+        unless required human approval and dry-run gates are satisfied.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartJobRequest'
+      responses:
+        '202':
+          description: Job start accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/pause:
+    post:
+      tags: [Execution Jobs]
+      operationId: pauseExecutionJob
+      summary: Pause a running job after the current safe operation completes.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonRequest'
+      responses:
+        '202':
+          description: Pause requested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/resume:
+    post:
+      tags: [Execution Jobs]
+      operationId: resumeExecutionJob
+      summary: Resume a paused job without adding new reasoning.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumeJobRequest'
+      responses:
+        '202':
+          description: Resume accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/cancel:
+    post:
+      tags: [Execution Jobs]
+      operationId: cancelExecutionJob
+      summary: Cancel a job. Does not roll back already-mutated resources.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelJobRequest'
+      responses:
+        '202':
+          description: Cancel requested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/instructions:
+    post:
+      tags: [Instructions]
+      operationId: submitExternalInstruction
+      summary: Submit an explicit next-action instruction from the external LLM controller.
+      description: |
+        The worker validates the instruction mechanically against schema,
+        namespace scope, dry-run gate, approval gate, idempotency lock, redaction,
+        timeout policy, and blocked-action policy. The worker never infers fixes
+        from the instruction rationale.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExternalInstructionRequest'
+      responses:
+        '202':
+          description: Instruction accepted or policy-blocked with observation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstructionResultResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/approvals:
+    post:
+      tags: [Instructions]
+      operationId: submitHumanApproval
+      summary: Submit human approval for a bounded action scope.
+      description: |
+        Approval authorizes only the explicit scope in the request. It does not
+        grant reasoning authority, does not bypass guardrails, and does not permit
+        Secret value copying or production data copying.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HumanApprovalRequest'
+      responses:
+        '201':
+          description: Approval recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanApprovalResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/plan:
+    get:
+      tags: [Observations]
+      operationId: getExecutionPlan
+      summary: Get parsed machine execution plan and normalized execution graph.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+      responses:
+        '200':
+          description: Parsed plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionPlanResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/observations:
+    get:
+      tags: [Observations]
+      operationId: listObservations
+      summary: List structured observations for a job.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [debug, info, warning, error, critical]
+        - name: phase_id
+          in: query
+          schema: { type: string }
+        - name: step_id
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Observation page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObservationListResponse'
+  /v1/execution-jobs/{job_id}/events:
+    get:
+      tags: [Observations]
+      operationId: listJobEvents
+      summary: List state-machine events for a job.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+      responses:
+        '200':
+          description: Event page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobEventListResponse'
+  /v1/execution-jobs/{job_id}/audit-events:
+    get:
+      tags: [Observations]
+      operationId: listAuditEvents
+      summary: List immutable audit events for a job.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+      responses:
+        '200':
+          description: Audit event page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventListResponse'
+  /v1/execution-jobs/{job_id}/memory-context:
+    get:
+      tags: [Observations]
+      operationId: getMemoryContext
+      summary: Get redacted execution memory context for external LLM use.
+      description: Memory output is factual context only and has no decision authority.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - name: include_semantic_failure_memory
+          in: query
+          schema: { type: boolean, default: true }
+        - name: include_audit_summary
+          in: query
+          schema: { type: boolean, default: true }
+      responses:
+        '200':
+          description: Redacted memory context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryContextResponse'
+  /v1/execution-jobs/{job_id}/stream:
+    get:
+      tags: [Observations]
+      operationId: streamJobEvents
+      summary: Stream job events via server-sent events.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+      responses:
+        '200':
+          description: Server-sent event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/execution-jobs/{job_id}/rollback:
+    post:
+      tags: [Execution Jobs]
+      operationId: requestRollback
+      summary: Request rollback according to an external LLM instruction and human approval.
+      description: |
+        The worker does not decide rollback strategy. The request must include the
+        external LLM rollback instruction and a human approval token if the action
+        is mutating or destructive.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackRequest'
+      responses:
+        '202':
+          description: Rollback request accepted or policy-blocked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionJobResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/execution-jobs/{job_id}/reports:
+    get:
+      tags: [Reports]
+      operationId: listReports
+      summary: List generated execution artifacts and reports.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+      responses:
+        '200':
+          description: Report artifact list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportListResponse'
+  /v1/execution-jobs/{job_id}/reports/release-notes:
+    post:
+      tags: [Reports]
+      operationId: generateReleaseNotes
+      summary: Request release/execution notes generation after execution or rollback.
+      parameters:
+        - $ref: '#/components/parameters/JobIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateReleaseNotesRequest'
+      responses:
+        '202':
+          description: Release note generation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportListResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/policy/evaluate:
+    post:
+      tags: [Policy]
+      operationId: evaluatePolicy
+      summary: Evaluate a proposed action against deterministic guardrails without executing it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyEvaluationRequest'
+      responses:
+        '200':
+          description: Policy evaluation result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyEvaluationResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+  /v1/redaction/preview:
+    post:
+      tags: [Policy]
+      operationId: previewRedaction
+      summary: Preview deterministic redaction on proposed observation text or manifest content.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedactionPreviewRequest'
+      responses:
+        '200':
+          description: Redaction result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedactionPreviewResponse'
+        default:
+          $ref: '#/components/responses/DefaultProblem'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    BundleIdPath:
+      name: bundle_id
+      in: path
+      required: true
+      schema: { type: string }
+    JobIdPath:
+      name: job_id
+      in: path
+      required: true
+      schema: { type: string }
+    CorrelationIdHeader:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      schema: { type: string }
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Required for clients that retry POST requests.
+      schema: { type: string, maxLength: 128 }
+    LimitQuery:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+    CursorQuery:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+  responses:
+    DefaultProblem:
+      description: Error response.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, version, timestamp]
+      properties:
+        status: { type: string, enum: [ok] }
+        service: { type: string, example: bosgenesis-mop-execution-agent }
+        version: { type: string, example: 0.1.0 }
+        timestamp: { type: string, format: date-time }
+    ReadinessResponse:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReadinessCheck'
+    ReadinessCheck:
+      type: object
+      required: [name, status]
+      properties:
+        name: { type: string }
+        status: { type: string, enum: [ok, warning, failed] }
+        message: { type: string }
+    CapabilitiesResponse:
+      type: object
+      required: [service, reasoning_authority, supported_instruction_types, guardrails, mcp_adapters]
+      properties:
+        service: { type: string }
+        reasoning_authority:
+          type: object
+          required: [worker_agent, external_llm_controller, human_approver]
+          properties:
+            worker_agent: { type: boolean, const: false }
+            external_llm_controller: { type: boolean, const: true }
+            human_approver: { type: string, enum: [authorization_only] }
+        supported_instruction_types:
+          type: array
+          items: { $ref: '#/components/schemas/InstructionType' }
+        guardrails:
+          type: array
+          items: { type: string }
+        mcp_adapters:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              status: { type: string, enum: [enabled, disabled, unavailable] }
+              operations:
+                type: array
+                items: { type: string }
+    EffectiveConfigResponse:
+      type: object
+      required: [config, redacted]
+      properties:
+        config:
+          type: object
+          additionalProperties: true
+        redacted: { type: boolean, const: true }
+    ArtifactBundleRegisterRequest:
+      type: object
+      required: [source, target_namespace]
+      properties:
+        source:
+          $ref: '#/components/schemas/BundleSource'
+        target_namespace:
+          type: string
+          description: Required target namespace. Must match or safely override the bundle contract.
+        expected_mop_id: { type: string }
+        expected_run_id: { type: string }
+        registered_by: { type: string }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+    BundleSource:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [local_path, object_storage_uri, mop_creation_run_ref, archive_upload_ref, inline_index]
+        uri: { type: string }
+        local_path: { type: string }
+        mop_id: { type: string }
+        run_id: { type: string }
+        upload_id: { type: string }
+        artifact_index:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    ArtifactBundleResponse:
+      type: object
+      required: [bundle]
+      properties:
+        bundle:
+          $ref: '#/components/schemas/ArtifactBundle'
+    ArtifactBundleListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ArtifactBundle' }
+        next_cursor: { type: string }
+    ArtifactBundle:
+      type: object
+      required: [bundle_id, target_namespace, status, created_at]
+      properties:
+        bundle_id: { type: string }
+        source: { $ref: '#/components/schemas/BundleSource' }
+        mop_id: { type: string }
+        run_id: { type: string }
+        source_namespace: { type: string }
+        target_namespace: { type: string }
+        status: { type: string, enum: [registered, uploaded, unpacked, validated, invalid, quarantined] }
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/BundleFile' }
+        validation_summary:
+          $ref: '#/components/schemas/ValidationSummary'
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BundleFile:
+      type: object
+      required: [path, role]
+      properties:
+        path: { type: string }
+        role:
+          type: string
+          enum: [artifact_manifest, artifact_index, response, machine_execution_plan, human_mop_markdown, installation_notes, human_mop_pdf, generated_manifest, helm_values, evidence, archive, other]
+        size_bytes: { type: integer, minimum: 0 }
+        sha256: { type: string }
+        previewable: { type: boolean }
+    BundleValidationRequest:
+      type: object
+      properties:
+        target_namespace: { type: string }
+        strict: { type: boolean, default: true }
+        require_machine_execution_plan: { type: boolean, default: true }
+        require_no_secret_values: { type: boolean, default: true }
+        require_target_namespace_only: { type: boolean, default: true }
+    BundleValidationResponse:
+      type: object
+      required: [bundle_id, valid, summary, findings]
+      properties:
+        bundle_id: { type: string }
+        valid: { type: boolean }
+        summary: { $ref: '#/components/schemas/ValidationSummary' }
+        findings:
+          type: array
+          items: { $ref: '#/components/schemas/ValidationFinding' }
+    ValidationSummary:
+      type: object
+      properties:
+        machine_plan_found: { type: boolean }
+        artifact_index_found: { type: boolean }
+        generated_manifests_count: { type: integer }
+        helm_values_count: { type: integer }
+        no_secret_values: { type: boolean }
+        no_production_data: { type: boolean }
+        target_namespace_only: { type: boolean }
+        dry_run_required: { type: boolean }
+        human_approval_required: { type: boolean }
+        warning_count: { type: integer }
+        error_count: { type: integer }
+    ValidationFinding:
+      type: object
+      required: [severity, code, message]
+      properties:
+        severity: { type: string, enum: [info, warning, error, critical] }
+        code: { type: string }
+        message: { type: string }
+        path: { type: string }
+        resource_ref: { $ref: '#/components/schemas/ResourceRef' }
+    CreateExecutionJobRequest:
+      type: object
+      required: [bundle_id, target_namespace, execution_mode, external_llm_controller]
+      properties:
+        job_name: { type: string }
+        bundle_id: { type: string }
+        target_namespace: { type: string }
+        source_namespace: { type: string }
+        execution_mode:
+          $ref: '#/components/schemas/ExecutionMode'
+        policy_profile:
+          type: string
+          default: namespace-only-v1
+        external_llm_controller:
+          $ref: '#/components/schemas/ExternalLlmController'
+        approval_policy:
+          $ref: '#/components/schemas/ApprovalPolicy'
+        notification_webhooks:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationWebhook' }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        created_by: { type: string }
+    ExecutionMode:
+      type: string
+      enum: [validate_only, dry_run_only, execute_after_approval, external_llm_controlled]
+    ExternalLlmController:
+      type: object
+      required: [controller_id]
+      properties:
+        controller_id: { type: string }
+        callback_url: { type: string, format: uri }
+        decision_timeout_seconds: { type: integer, minimum: 1, default: 3600 }
+        context_pack_preference:
+          type: string
+          enum: [minimal, standard, full_redacted]
+          default: standard
+    ApprovalPolicy:
+      type: object
+      properties:
+        human_approval_before_mutation: { type: boolean, default: true }
+        human_approval_before_rollback: { type: boolean, default: true }
+        human_approval_before_destructive_action: { type: boolean, default: true }
+        dry_run_before_mutation: { type: boolean, default: true }
+        approval_expires_after_seconds: { type: integer, minimum: 60, default: 3600 }
+    NotificationWebhook:
+      type: object
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri }
+        secret_ref: { type: string, description: Reference to a secret, never the secret value. }
+        events:
+          type: array
+          items: { type: string }
+    ExecutionJobResponse:
+      type: object
+      required: [job]
+      properties:
+        job:
+          $ref: '#/components/schemas/ExecutionJob'
+        next_required_decision:
+          $ref: '#/components/schemas/DecisionRequest'
+    ExecutionJobListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ExecutionJob' }
+        next_cursor: { type: string }
+    ExecutionJob:
+      type: object
+      required: [job_id, bundle_id, target_namespace, state, created_at, updated_at]
+      properties:
+        job_id: { type: string }
+        job_name: { type: string }
+        bundle_id: { type: string }
+        mop_id: { type: string }
+        run_id: { type: string }
+        correlation_id: { type: string }
+        source_namespace: { type: string }
+        target_namespace: { type: string }
+        execution_mode: { $ref: '#/components/schemas/ExecutionMode' }
+        state: { $ref: '#/components/schemas/JobState' }
+        current_phase_id: { type: string }
+        current_step_id: { type: string }
+        dry_run_satisfied: { type: boolean }
+        approval_status: { type: string, enum: [not_required, missing, active, expired, rejected] }
+        decision_required: { type: boolean }
+        blocked: { type: boolean }
+        progress:
+          type: object
+          properties:
+            total_phases: { type: integer }
+            completed_phases: { type: integer }
+            total_steps: { type: integer }
+            completed_steps: { type: integer }
+            failed_steps: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        links:
+          type: object
+          additionalProperties: { type: string }
+    JobState:
+      type: string
+      enum:
+        - created
+        - validating_bundle
+        - invalid_bundle
+        - awaiting_human_approval
+        - dry_run_ready
+        - dry_running
+        - awaiting_llm_instruction
+        - executing
+        - decision_required
+        - paused
+        - wait_scheduled
+        - validation_running
+        - rollback_requested
+        - rolling_back
+        - completed
+        - failed
+        - cancelled
+    StartJobRequest:
+      type: object
+      properties:
+        max_steps_until_pause: { type: integer, minimum: 1 }
+        allow_non_mutating_checks: { type: boolean, default: true }
+        require_decision_before_first_mutation: { type: boolean, default: true }
+    ReasonRequest:
+      type: object
+      properties:
+        reason: { type: string }
+        requested_by: { type: string }
+    ResumeJobRequest:
+      type: object
+      properties:
+        requested_by: { type: string }
+        expected_state:
+          $ref: '#/components/schemas/JobState'
+    CancelJobRequest:
+      type: object
+      required: [reason, requested_by]
+      properties:
+        reason: { type: string }
+        requested_by: { type: string }
+        acknowledge_no_automatic_rollback: { type: boolean, const: true }
+    ExternalInstructionRequest:
+      type: object
+      required: [instruction_id, instruction_type, issued_by, controller_id]
+      properties:
+        instruction_id: { type: string }
+        controller_id: { type: string }
+        issued_by: { type: string }
+        issued_at: { type: string, format: date-time }
+        instruction_type:
+          $ref: '#/components/schemas/InstructionType'
+        target_phase_id: { type: string }
+        target_step_id: { type: string }
+        target_resource:
+          $ref: '#/components/schemas/ResourceRef'
+        rationale:
+          type: string
+          description: Non-authoritative controller explanation. The worker does not infer actions from this field.
+        wait_seconds: { type: integer, minimum: 1 }
+        retry_policy:
+          type: object
+          properties:
+            max_attempts: { type: integer, minimum: 1, maximum: 10 }
+            backoff_seconds: { type: integer, minimum: 0 }
+        manifest_patch:
+          $ref: '#/components/schemas/ManifestPatch'
+        replacement_manifest:
+          type: string
+          description: Full manifest content. Must be redacted and target-namespace scoped.
+        validation_selector:
+          type: string
+        approval_token: { type: string }
+        dry_run_required: { type: boolean, default: true }
+        destructive_action: { type: boolean, default: false }
+        safety_acknowledgements:
+          type: array
+          items: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    InstructionType:
+      type: string
+      enum:
+        - continue
+        - retry
+        - wait
+        - skip
+        - patch_manifest
+        - replace_manifest
+        - run_validation
+        - request_human_approval
+        - rollback
+        - abort
+        - refresh_observation
+        - invoke_mcp_tool
+    InstructionResultResponse:
+      type: object
+      required: [accepted, job]
+      properties:
+        accepted: { type: boolean }
+        job: { $ref: '#/components/schemas/ExecutionJob' }
+        policy_result: { $ref: '#/components/schemas/PolicyEvaluationResult' }
+        observation: { $ref: '#/components/schemas/Observation' }
+        next_required_decision: { $ref: '#/components/schemas/DecisionRequest' }
+    ManifestPatch:
+      type: object
+      required: [patch_type, patch]
+      properties:
+        patch_type: { type: string, enum: [json_patch, merge_patch, strategic_merge_patch] }
+        patch:
+          type: object
+          additionalProperties: true
+        target_file: { type: string }
+        target_resource: { $ref: '#/components/schemas/ResourceRef' }
+    HumanApprovalRequest:
+      type: object
+      required: [approver_id, approval_scope, ticket_reference, statement]
+      properties:
+        approver_id: { type: string }
+        approver_role: { type: string }
+        approval_scope:
+          $ref: '#/components/schemas/ApprovalScope'
+        ticket_reference: { type: string }
+        statement: { type: string }
+        expires_at: { type: string, format: date-time }
+        approved_resource_refs:
+          type: array
+          items: { $ref: '#/components/schemas/ResourceRef' }
+        approved_phase_ids:
+          type: array
+          items: { type: string }
+        approved_step_ids:
+          type: array
+          items: { type: string }
+        policy_exception_id: { type: string }
+    ApprovalScope:
+      type: string
+      enum:
+        - non_mutating_validation
+        - dry_run
+        - namespace_creation
+        - mutation
+        - rollback
+        - destructive_rollback
+        - policy_exception
+    HumanApprovalResponse:
+      type: object
+      required: [approval]
+      properties:
+        approval:
+          type: object
+          required: [approval_id, status]
+          properties:
+            approval_id: { type: string }
+            status: { type: string, enum: [recorded, rejected, expired] }
+            approval_token: { type: string }
+            expires_at: { type: string, format: date-time }
+    ExecutionPlanResponse:
+      type: object
+      required: [job_id, plan]
+      properties:
+        job_id: { type: string }
+        plan:
+          $ref: '#/components/schemas/ExecutionPlan'
+    ExecutionPlan:
+      type: object
+      properties:
+        schema_version: { type: string }
+        authority_order: { type: string }
+        target_namespace: { type: string }
+        dry_run_before_mutation: { type: boolean }
+        human_approval_before_mutation: { type: boolean }
+        phases:
+          type: array
+          items: { $ref: '#/components/schemas/ExecutionPhase' }
+        raw_machine_execution_plan:
+          type: object
+          additionalProperties: true
+    ExecutionPhase:
+      type: object
+      properties:
+        phase_id: { type: string }
+        depends_on:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [pending, ready, running, completed, failed, skipped, blocked] }
+        objective: { type: string }
+        steps:
+          type: array
+          items: { $ref: '#/components/schemas/ExecutionStep' }
+    ExecutionStep:
+      type: object
+      properties:
+        step_id: { type: string }
+        phase_id: { type: string }
+        title: { type: string }
+        type: { type: string }
+        status: { type: string, enum: [pending, ready, dry_running, awaiting_approval, executing, completed, failed, skipped, blocked] }
+        depends_on:
+          type: array
+          items: { type: string }
+        commands:
+          type: array
+          items: { $ref: '#/components/schemas/CommandSpec' }
+        expected_outcomes:
+          type: array
+          items: { type: string }
+    CommandSpec:
+      type: object
+      properties:
+        command_id: { type: string }
+        kind: { type: string, enum: [check, dry_run, apply, helm, validate, rollback, wait, mcp_call] }
+        command: { type: string }
+        mcp_server: { type: string }
+        mcp_tool: { type: string }
+        mutating: { type: boolean }
+        destructive: { type: boolean }
+        timeout_seconds: { type: integer }
+    ObservationListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Observation' }
+        next_cursor: { type: string }
+    Observation:
+      type: object
+      required: [observation_id, job_id, timestamp, severity, observation_type, summary]
+      properties:
+        observation_id: { type: string }
+        job_id: { type: string }
+        phase_id: { type: string }
+        step_id: { type: string }
+        command_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        severity: { type: string, enum: [debug, info, warning, error, critical] }
+        observation_type:
+          type: string
+          enum: [state_transition, policy_check, dry_run_result, mutation_result, validation_result, mcp_call_result, wait_result, error, decision_request, memory_write]
+        summary: { type: string }
+        mcp_server: { type: string }
+        mcp_tool: { type: string }
+        resource_refs:
+          type: array
+          items: { $ref: '#/components/schemas/ResourceRef' }
+        stdout_redacted: { type: string }
+        stderr_redacted: { type: string }
+        result:
+          type: object
+          additionalProperties: true
+        redaction_applied: { type: boolean }
+        policy_blocks:
+          type: array
+          items: { $ref: '#/components/schemas/PolicyBlock' }
+        next_required_decision:
+          $ref: '#/components/schemas/DecisionRequest'
+    JobEventListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/JobEvent' }
+        next_cursor: { type: string }
+    JobEvent:
+      type: object
+      required: [event_id, job_id, timestamp, event_type]
+      properties:
+        event_id: { type: string }
+        job_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        event_type: { type: string }
+        from_state: { $ref: '#/components/schemas/JobState' }
+        to_state: { $ref: '#/components/schemas/JobState' }
+        actor_type: { type: string, enum: [worker, external_llm, human, system] }
+        actor_id: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+    AuditEventListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        next_cursor: { type: string }
+    AuditEvent:
+      type: object
+      required: [audit_event_id, timestamp, actor_type, action, redacted]
+      properties:
+        audit_event_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        job_id: { type: string }
+        actor_type: { type: string, enum: [worker, external_llm, human, system, mcp_server] }
+        actor_id: { type: string }
+        action: { type: string }
+        input_hash: { type: string }
+        output_hash: { type: string }
+        redacted: { type: boolean }
+        details:
+          type: object
+          additionalProperties: true
+    MemoryContextResponse:
+      type: object
+      required: [job_id, authority, layers]
+      properties:
+        job_id: { type: string }
+        authority: { type: string, enum: [context_only_not_decision_authority] }
+        layers:
+          type: array
+          items: { $ref: '#/components/schemas/MemoryLayer' }
+        warnings:
+          type: array
+          items: { type: string }
+    MemoryLayer:
+      type: object
+      required: [name, reasoning_allowed, records]
+      properties:
+        name:
+          type: string
+          enum: [in_run_state_memory, durable_job_memory, resource_state_memory, episodic_execution_memory, semantic_failure_memory, policy_memory, approval_memory, audit_memory, observability_memory]
+        reasoning_allowed: { type: boolean, const: false }
+        records:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    DecisionRequest:
+      type: object
+      properties:
+        decision_id: { type: string }
+        required_from: { type: string, enum: [external_llm, human_approver, both] }
+        reason_code: { type: string }
+        prompt_summary: { type: string }
+        context_pack_ref: { type: string }
+        allowed_instruction_types:
+          type: array
+          items: { $ref: '#/components/schemas/InstructionType' }
+        blocked_instruction_types:
+          type: array
+          items: { $ref: '#/components/schemas/InstructionType' }
+        expires_at: { type: string, format: date-time }
+    RollbackRequest:
+      type: object
+      required: [instruction, requested_by]
+      properties:
+        requested_by: { type: string }
+        instruction: { $ref: '#/components/schemas/ExternalInstructionRequest' }
+        approval_token: { type: string }
+        rollback_scope:
+          type: string
+          enum: [current_step, current_phase, entire_job, explicit_resources]
+        resource_refs:
+          type: array
+          items: { $ref: '#/components/schemas/ResourceRef' }
+    ReportListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ReportArtifact' }
+    GenerateReleaseNotesRequest:
+      type: object
+      properties:
+        format: { type: string, enum: [markdown, json], default: markdown }
+        include_audit_summary: { type: boolean, default: true }
+        include_redacted_observations: { type: boolean, default: true }
+        requested_by: { type: string }
+    ReportArtifact:
+      type: object
+      required: [report_id, report_type, path]
+      properties:
+        report_id: { type: string }
+        report_type: { type: string, enum: [execution_summary, validation_report, rollback_report, release_notes, audit_export] }
+        path: { type: string }
+        download_url: { type: string, format: uri-reference }
+        created_at: { type: string, format: date-time }
+        redacted: { type: boolean }
+    PolicyEvaluationRequest:
+      type: object
+      required: [action, target_namespace]
+      properties:
+        job_id: { type: string }
+        action: { type: string }
+        target_namespace: { type: string }
+        source_namespace: { type: string }
+        mutating: { type: boolean, default: false }
+        destructive: { type: boolean, default: false }
+        dry_run_satisfied: { type: boolean, default: false }
+        approval_token: { type: string }
+        resource_refs:
+          type: array
+          items: { $ref: '#/components/schemas/ResourceRef' }
+        manifest_content: { type: string }
+        instruction:
+          $ref: '#/components/schemas/ExternalInstructionRequest'
+    PolicyEvaluationResponse:
+      type: object
+      required: [result]
+      properties:
+        result: { $ref: '#/components/schemas/PolicyEvaluationResult' }
+    PolicyEvaluationResult:
+      type: object
+      required: [allowed, blocks, warnings]
+      properties:
+        allowed: { type: boolean }
+        blocks:
+          type: array
+          items: { $ref: '#/components/schemas/PolicyBlock' }
+        warnings:
+          type: array
+          items: { $ref: '#/components/schemas/PolicyBlock' }
+    PolicyBlock:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        severity: { type: string, enum: [warning, block, critical] }
+        guardrail: { type: string }
+    RedactionPreviewRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+        content_type: { type: string, enum: [text, yaml, json, command_output], default: text }
+    RedactionPreviewResponse:
+      type: object
+      required: [redacted_content, redaction_applied]
+      properties:
+        redacted_content: { type: string }
+        redaction_applied: { type: boolean }
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              count: { type: integer }
+    ResourceRef:
+      type: object
+      properties:
+        api_version: { type: string }
+        kind: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        file_path: { type: string }
+        helm_release_name: { type: string }
+    ProblemDetails:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        correlation_id: { type: string }
+        error_code: { type: string }
+        policy_blocks:
+          type: array
+          items: { $ref: '#/components/schemas/PolicyBlock' }
