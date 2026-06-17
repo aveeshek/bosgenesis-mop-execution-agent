@@ -1,6 +1,137 @@
 schema_version: "0.1.0"
-description: Placeholder for the versioned machine execution plan schema.
+description: Versioned schema contract for BOS Genesis MoP machine execution plans.
+type: object
+additionalProperties: false
 required:
   - schema_version
   - target_namespace
   - phases
+properties:
+  schema_version:
+    const: "0.1.0"
+  target_namespace:
+    type: string
+    minLength: 1
+  authority_order:
+    type: string
+  executor_contract:
+    type: object
+    additionalProperties: false
+    properties:
+      parse_this_block_first:
+        type: boolean
+        default: true
+      dry_run_before_mutation:
+        type: boolean
+        default: true
+      human_approval_before_mutation:
+        type: boolean
+        default: true
+      never_copy_secret_values:
+        type: boolean
+        default: true
+      target_namespace_only:
+        oneOf:
+          - type: boolean
+          - type: string
+      llm_suggestions_are_not_authority:
+        type: boolean
+  dependency_graph:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - phase_id
+      properties:
+        phase_id:
+          type: string
+          minLength: 1
+        depends_on:
+          type: array
+          items:
+            type: string
+  phases:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - phase_id
+        - objective
+      properties:
+        phase_id:
+          type: string
+          minLength: 1
+        title:
+          type: string
+        objective:
+          type: string
+          minLength: 1
+        depends_on:
+          type: array
+          items:
+            type: string
+        steps:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - step_id
+              - title
+              - type
+            properties:
+              step_id:
+                type: string
+                minLength: 1
+              title:
+                type: string
+                minLength: 1
+              type:
+                type: string
+                minLength: 1
+              depends_on:
+                type: array
+                items:
+                  type: string
+              evidence_refs:
+                type: array
+                items:
+                  type: string
+              manifest_refs:
+                type: array
+                items:
+                  type: string
+              values_refs:
+                type: array
+                items:
+                  type: string
+              commands:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - kind
+                    - command
+                  properties:
+                    kind:
+                      type: string
+                    command:
+                      type: string
+                    dry_run:
+                      type: boolean
+                    mutating:
+                      type: boolean
+              expected_outcomes:
+                type: array
+                items:
+                  type: string
+              required_human_inputs:
+                type: array
+                items:
+                  type: string
+              inference:
+                type: object

@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from bosgenesis_mop_execution_agent import __version__
 from bosgenesis_mop_execution_agent.api.schemas import HealthResponse
+from bosgenesis_mop_execution_agent.mcp_server.routes import router as mcp_router
 
 
 def create_app() -> FastAPI:
@@ -26,5 +27,7 @@ def create_app() -> FastAPI:
             version=__version__,
             timestamp=datetime.now(UTC),
         )
+
+    app.include_router(mcp_router)
 
     return app

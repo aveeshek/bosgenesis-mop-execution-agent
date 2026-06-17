@@ -37,4 +37,5 @@ class HumanApproval(StrictBaseModel):
     approved_resource_refs: list[ResourceRef] = []
     approved_phase_ids: list[str] = []
     approved_step_ids: list[str] = []
+    command_fingerprint: str | None = None
     policy_exception_id: str | None = None

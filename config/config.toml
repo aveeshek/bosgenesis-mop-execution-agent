@@ -1,0 +1,69 @@
+# Append this block to ~/.codex/config.toml after the MoP Execution Agent MCP
+# endpoint is enabled on the deployed service.
+
+[mcp_servers.bosgenesis_mop_execution]
+enabled = true
+url = "http://mop-execution-agent.bosgenesis.local/mcp"
+startup_timeout_sec = 20
+tool_timeout_sec = 300
+default_tools_approval_mode = "prompt"
+
+enabled_tools = [
+  "mop_execution_health",
+  "mop_execution_get_capabilities",
+  "mop_execution_register_bundle",
+  "mop_execution_validate_bundle",
+  "mop_execution_create_job",
+  "mop_execution_get_job",
+  "mop_execution_list_jobs",
+  "mop_execution_start_job",
+  "mop_execution_pause_job",
+  "mop_execution_resume_job",
+  "mop_execution_cancel_job",
+  "mop_execution_submit_instruction",
+  "mop_execution_submit_approval",
+  "mop_execution_get_plan",
+  "mop_execution_get_next_required_decision",
+  "mop_execution_list_observations",
+  "mop_execution_list_audit_events",
+  "mop_execution_get_memory_context",
+  "mop_execution_evaluate_policy",
+  "mop_execution_request_rollback",
+  "mop_execution_generate_release_notes",
+]
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_register_bundle]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_validate_bundle]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_create_job]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_start_job]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_pause_job]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_resume_job]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_cancel_job]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_submit_instruction]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_submit_approval]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_evaluate_policy]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_request_rollback]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_generate_release_notes]
+approval_mode = "prompt"

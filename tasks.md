@@ -53,32 +53,32 @@ Goal: make jobs durable, idempotent, and restart-safe. Requirement coverage: `[F
 
 Goal: parse and validate MoP Creation Agent output bundles. Requirement coverage: `[FR-006] [FR-007] [FR-008] [FR-009] [FR-010] [FR-011] [FR-012] [AC-001] [AC-002] [AC-003]`.
 
-- [ ] [FR-006][AC-001] Implement bundle source resolver for local path, uploaded archive, MoP creation run reference, artifact manifest, and object storage placeholder.
-- [ ] [FR-006][FR-007] Implement `machine_execution_plan.yaml` parser and versioned schema.
-- [ ] [FR-012] Implement dependency graph builder and cycle detection.
-- [ ] [FR-008] Parse installation notes only as fallback/supporting context.
-- [ ] [FR-008] Parse human MoP Markdown only as supporting context.
-- [ ] [FR-011] Read `artifact.json`, `artifact-index.json`, and `response.json` when present.
-- [ ] [FR-009] Load generated Kubernetes manifests and validate required fields, namespace, kind, name, scope, and references.
-- [ ] [FR-010] Load Helm values files and validate redaction/safety posture.
-- [ ] [AC-002][AC-003] Fail closed for missing machine plan, unsupported schema, invalid schema, graph cycles, missing files, invalid YAML, and unknown resource references.
-- [ ] [AC-001] Add sample bundle validation tests proving machine plan is parsed first and Markdown cannot override it.
+- [x] [FR-006][AC-001] Implement bundle source resolver for local path, uploaded archive, MoP creation run reference, artifact manifest, and object storage placeholder.
+- [x] [FR-006][FR-007] Implement `machine_execution_plan.yaml` parser and versioned schema.
+- [x] [FR-012] Implement dependency graph builder and cycle detection.
+- [x] [FR-008] Parse installation notes only as fallback/supporting context.
+- [x] [FR-008] Parse human MoP Markdown only as supporting context.
+- [x] [FR-011] Read `artifact.json`, `artifact-index.json`, and `response.json` when present.
+- [x] [FR-009] Load generated Kubernetes manifests and validate required fields, namespace, kind, name, scope, and references.
+- [x] [FR-010] Load Helm values files and validate redaction/safety posture.
+- [x] [AC-002][AC-003] Fail closed for missing machine plan, unsupported schema, invalid schema, graph cycles, missing files, invalid YAML, and unknown resource references.
+- [x] [AC-001] Add sample bundle validation tests proving machine plan is parsed first and Markdown cannot override it.
 
 ## Phase 4 - Redaction and Safety Policy Engine
 
 Goal: enforce guardrails before execution exists. Requirement coverage: `[FR-015] [FR-016] [FR-017] [FR-018] [FR-019] [FR-020] [FR-030] [FR-032] [FR-033] [AC-005] [AC-006] [AC-007] [AC-008] [AC-009] [AC-010] [AC-023] [AC-028]`.
 
-- [ ] [FR-018][AC-008] Implement namespace-scope guard.
-- [ ] [FR-018][AC-009] Implement cluster-scoped resource blocker.
-- [ ] [FR-019][AC-010] Implement Secret value detector for manifests, values, instructions, logs, and outputs.
-- [ ] [FR-020] Implement production data copy detector and PVC data-copy blocker.
-- [ ] [FR-015][AC-005] Implement dry-run gate independent of plan trust.
-- [ ] [FR-016][FR-017][AC-006][AC-007] Implement approval gate, approval scope matcher, command fingerprinting, and expiration checks.
-- [ ] [FR-030] Integrate idempotency guard with policy decisions.
-- [ ] [FR-032] Add timeout and retry limit policy checks.
-- [ ] [FR-033][AC-028] Implement redaction for strings, YAML, JSON, logs, events, values files, MCP responses, reports, and memory writes.
-- [ ] [AC-023] Implement audit-before-mutation guard.
-- [ ] [AC-010][AC-028] Add security tests with fake secrets, base64 payloads, passwords, tokens, connection strings, private keys, and sensitive env vars.
+- [x] [FR-018][AC-008] Implement namespace-scope guard.
+- [x] [FR-018][AC-009] Implement cluster-scoped resource blocker.
+- [x] [FR-019][AC-010] Implement Secret value detector for manifests, values, instructions, logs, and outputs.
+- [x] [FR-020] Implement production data copy detector and PVC data-copy blocker.
+- [x] [FR-015][AC-005] Implement dry-run gate independent of plan trust.
+- [x] [FR-016][FR-017][AC-006][AC-007] Implement approval gate, approval scope matcher, command fingerprinting, and expiration checks.
+- [x] [FR-030] Integrate idempotency guard with policy decisions.
+- [x] [FR-032] Add timeout and retry limit policy checks.
+- [x] [FR-033][AC-028] Implement redaction for strings, YAML, JSON, logs, events, values files, MCP responses, reports, and memory writes.
+- [x] [AC-023] Implement audit-before-mutation guard.
+- [x] [AC-010][AC-028] Add security tests with fake secrets, base64 payloads, passwords, tokens, connection strings, private keys, and sensitive env vars.
 
 ## Phase 5 - REST API and MCP Tool Surface
 
@@ -101,13 +101,13 @@ Goal: expose deterministic job control APIs and MCP tools. Requirement coverage:
 
 Goal: implement typed clients for governed MCP integrations. Requirement coverage: `[FR-021] [FR-022] [FR-023] [FR-024] [NFR-011]`.
 
-- [ ] [NFR-011] Implement common MCP client base with timeout, structured results, safe transport retry, correlation IDs, redaction, structured errors, and audit hooks.
-- [ ] [FR-021] Implement Kubernetes Inspector MCP client methods for namespace, dry-run apply, apply, get/list/describe, events, pod status/logs, delete, wait, and rollout checks.
-- [ ] [FR-022] Implement Helm Manager MCP client methods for repo operations, template, dry-run install/upgrade, install/upgrade, status, history, rollback, and uninstall.
-- [ ] [FR-023] Implement Data Ingestion MCP client for latest snapshot, historical facts, and recent events.
-- [ ] [FR-024] Implement Release Note MCP client.
-- [ ] [NFR-011] Add fake MCP servers for success, errors, timeouts, malformed responses, and redaction checks.
-- [ ] [FR-021][FR-022][FR-023][FR-024] Add MCP contract tests proving failures create observations and never trigger worker reasoning.
+- [x] [NFR-011] Implement common MCP client base with timeout, structured results, safe transport retry, correlation IDs, redaction, structured errors, and audit hooks.
+- [x] [FR-021] Implement Kubernetes Inspector MCP client methods for namespace, dry-run apply, apply, get/list/describe, events, pod status/logs, delete, wait, and rollout checks.
+- [x] [FR-022] Implement Helm Manager MCP client methods for repo operations, template, dry-run install/upgrade, install/upgrade, status, history, rollback, and uninstall.
+- [x] [FR-023] Implement Data Ingestion MCP client for latest snapshot, historical facts, and recent events.
+- [x] [FR-024] Implement Release Note MCP client.
+- [x] [NFR-011] Add fake MCP servers for success, errors, timeouts, malformed responses, and redaction checks.
+- [x] [FR-021][FR-022][FR-023][FR-024] Add MCP contract tests proving failures create observations and never trigger worker reasoning.
 
 ## Phase 7 - Async Execution Runtime
 

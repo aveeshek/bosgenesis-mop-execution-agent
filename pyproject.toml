@@ -61,3 +61,7 @@ packages = ["bosgenesis_mop_execution_agent"]
 [[tool.mypy.overrides]]
 module = ["fastapi.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
