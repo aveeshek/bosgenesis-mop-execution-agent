@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from bosgenesis_mop_execution_agent.api.service import MopExecutionApiService
 from bosgenesis_mop_execution_agent.mcp_server.tools import (
     PROTOCOL_VERSION,
     SERVER_NAME,
@@ -39,17 +40,21 @@ async def post_mcp(request: Request) -> JSONResponse:
         payload = await request.json()
     except json.JSONDecodeError:
         return JSONResponse(_jsonrpc_error(None, -32700, "Parse error"), status_code=400)
+    service = request.app.state.mop_execution_service
     if isinstance(payload, list):
-        return JSONResponse([_handle_jsonrpc(item) for item in payload])
+        return JSONResponse([_handle_jsonrpc(item, service) for item in payload])
     if not isinstance(payload, dict):
         return JSONResponse(_jsonrpc_error(None, -32600, "Invalid Request"), status_code=400)
-    response = _handle_jsonrpc(payload)
+    response = _handle_jsonrpc(payload, service)
     if response is None:
         return JSONResponse({}, status_code=202)
     return JSONResponse(response)
 
 
-def _handle_jsonrpc(payload: dict[str, Any]) -> dict[str, Any] | None:
+def _handle_jsonrpc(
+    payload: dict[str, Any],
+    service: MopExecutionApiService,
+) -> dict[str, Any] | None:
     request_id = payload.get("id")
     method = payload.get("method")
     params = payload.get("params")
@@ -77,7 +82,7 @@ def _handle_jsonrpc(payload: dict[str, Any]) -> dict[str, Any] | None:
         arguments = params.get("arguments", {})
         if not isinstance(name, str) or not isinstance(arguments, dict):
             return _jsonrpc_error(request_id, -32602, "Invalid params")
-        return _jsonrpc_result(request_id, call_tool(name, arguments))
+        return _jsonrpc_result(request_id, call_tool(name, arguments, service))
     if method == "resources/list":
         return _jsonrpc_result(
             request_id,
@@ -92,7 +97,9 @@ def _handle_jsonrpc(payload: dict[str, Any]) -> dict[str, Any] | None:
             },
         )
     if method == "resources/read":
-        capabilities_text = call_tool("mop_execution_get_capabilities", {})["content"][0]["text"]
+        capabilities_text = call_tool("mop_execution_get_capabilities", {}, service)["content"][0][
+            "text"
+        ]
         return _jsonrpc_result(
             request_id,
             {

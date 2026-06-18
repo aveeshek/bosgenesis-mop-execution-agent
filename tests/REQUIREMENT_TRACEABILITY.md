@@ -58,3 +58,42 @@ This file maps implementation and tests back to `knowledge-base/SPECS.md`.
 | FR-023 | Data Ingestion MCP typed client methods | `tests/contract/test_phase6_mcp_clients.py::test_helm_data_ingestion_and_release_note_clients_expose_typed_methods` |
 | FR-024 | Release Note MCP typed client methods | `tests/contract/test_phase6_mcp_clients.py::test_helm_data_ingestion_and_release_note_clients_expose_typed_methods` |
 | NFR-011 | MCP timeout, retry, redaction, structured errors, observations, and audit hooks | `tests/contract/test_phase6_mcp_clients.py` |
+| FR-001 | REST artifact bundle registration/validation and execution job creation endpoints | `tests/contract/test_phase5_rest_api.py` |
+| FR-002 | REST job state control, retrieval, plan, observation, event, audit, memory, and report endpoints | `tests/contract/test_phase5_rest_api.py` |
+| FR-003 | External instruction submission endpoint | `tests/contract/test_phase5_rest_api.py::test_instruction_approval_reports_cancel_and_mcp_mirror` |
+| FR-004 | Human approval submission endpoint | `tests/contract/test_phase5_rest_api.py::test_instruction_approval_reports_cancel_and_mcp_mirror` |
+| FR-005 | Start, pause, resume, cancel, and rollback request endpoints | `tests/contract/test_phase5_rest_api.py` |
+| FR-037 | MCP server tools mirror REST job-control behavior and return standard result envelopes | `tests/test_mcp_server.py` |
+| FR-038 | Health, readiness, capabilities, effective redacted config, and auth placeholder | `tests/contract/test_phase5_rest_api.py` |
+| FR-039 | Report list, metadata, and release note request endpoints | `tests/contract/test_phase5_rest_api.py::test_instruction_approval_reports_cancel_and_mcp_mirror` |
+| FR-013 | Phase dependency scheduler and next step selector | `tests/unit/test_phase7_runtime.py::test_scheduler_respects_phase_and_step_dependencies` |
+| FR-014 | Runtime ambiguity and unsupported execution pause as decision-required without worker reasoning | `tests/unit/test_phase7_runtime.py::test_wait_timeout_enters_decision_required_without_reasoning` |
+| FR-025 | Restart-safe queue and worker loop over persisted jobs | `tests/unit/test_phase7_runtime.py::test_worker_restart_rehydrates_runnable_jobs` |
+| FR-028 | Runtime observations for state transitions, dry-run results, waits, errors, and decisions | `tests/unit/test_phase7_runtime.py` |
+| FR-029 | Decision-required context builder with context-only memory authority | `tests/unit/test_phase7_runtime.py::test_namespace_lock_contention_pauses_for_decision` |
+| FR-031 | Runtime namespace lock acquisition and release | `tests/unit/test_phase7_runtime.py::test_cancel_safe_stop_releases_lock_and_cancels_pending_steps` |
+| FR-032 | Wait/poll timeout handling | `tests/unit/test_phase7_runtime.py::test_wait_timeout_enters_decision_required_without_reasoning` |
+| AC-011 | Runtime failures stop in decision-required state without remediation | `tests/unit/test_phase7_runtime.py::test_wait_timeout_enters_decision_required_without_reasoning` |
+| AC-012 | Long-running waits and timeouts emit decision context | `tests/unit/test_phase7_runtime.py::test_wait_timeout_enters_decision_required_without_reasoning` |
+| AC-013 | Restart recovery requeues persisted runnable state | `tests/unit/test_phase7_runtime.py::test_worker_restart_rehydrates_runnable_jobs` |
+| AC-018 | Cancellations and decision-required states are restart-safe and auditable | `tests/unit/test_phase7_runtime.py` |
+| AC-021 | Worker restart recovery uses persisted job state | `tests/unit/test_phase7_runtime.py::test_worker_restart_rehydrates_runnable_jobs` |
+| AC-024 | Namespace lock contention pauses execution and keeps the existing lock owner | `tests/unit/test_phase7_runtime.py::test_namespace_lock_contention_pauses_for_decision` |
+| FR-015 | Plan command kinds map to deterministic Kubernetes and Helm dry-run actions | `tests/unit/test_phase8_dry_run.py` |
+| FR-021 | Kubernetes server-side dry-run apply executor | `tests/unit/test_phase8_dry_run.py::test_dry_run_only_e2e_uses_kubernetes_server_side_dry_run_sample_bundle` |
+| FR-022 | Helm template and dry-run install/upgrade executor | `tests/unit/test_phase8_dry_run.py::test_helm_render_failure_fixture_pauses_before_dry_run_install` |
+| FR-028 | Dry-run outputs are persisted as redacted observations | `tests/unit/test_phase8_dry_run.py::test_dry_run_only_e2e_uses_kubernetes_server_side_dry_run_sample_bundle` |
+| FR-040 | `dry_run_only` jobs complete preflight without mutation | `tests/unit/test_phase8_dry_run.py::test_dry_run_only_e2e_uses_kubernetes_server_side_dry_run_sample_bundle` |
+| AC-004 | Dry-run-only E2E uses the sample MoP bundle | `tests/unit/test_phase8_dry_run.py::test_dry_run_only_e2e_uses_kubernetes_server_side_dry_run_sample_bundle` |
+| AC-012 | YAML syntax errors pause without MCP mutation or worker reasoning | `tests/unit/test_phase8_dry_run.py::test_yaml_syntax_error_fixture_pauses_before_mcp_call` |
+| AC-015 | Helm render failures pause before dry-run install/upgrade mutation path | `tests/unit/test_phase8_dry_run.py::test_helm_render_failure_fixture_pauses_before_dry_run_install` |
+| FR-016 | Mutation gate requires matching active human approval before namespace-scoped mutation | `tests/unit/test_phase9_mutation.py` |
+| FR-017 | Mutation approval matching uses bounded step scope and command fingerprint | `tests/unit/test_phase9_mutation.py::test_mutation_gates_block_missing_dry_run_approval_scope_and_namespace` |
+| FR-018 | Mutation gate blocks manifests outside the target namespace | `tests/unit/test_phase9_mutation.py::test_mutation_gates_block_missing_dry_run_approval_scope_and_namespace` |
+| FR-021 | Kubernetes apply executor runs only after mutation gates pass | `tests/unit/test_phase9_mutation.py::test_approved_disposable_namespace_k8s_mutation_executes_after_all_gates` |
+| FR-022 | Helm install/upgrade executor runs only after mutation gates pass | `tests/unit/test_phase9_mutation.py::test_approved_helm_install_upgrade_mutation_uses_helm_executor` |
+| FR-028 | Mutation observations include redacted outputs and resource mutation records | `tests/unit/test_phase9_mutation.py::test_approved_disposable_namespace_k8s_mutation_executes_after_all_gates` |
+| FR-030 | Duplicate continue instruction idempotency replays the same bounded request | `tests/unit/test_phase9_mutation.py::test_duplicate_continue_instruction_idempotency_replays_same_request` |
+| NFR-001 | Unknown mutation outcome pauses with a critical factual observation | `tests/unit/test_phase9_mutation.py::test_unknown_mutation_outcome_pauses_with_critical_observation` |
+| AC-019 | Mutations require explicit external continue instruction and approved scope | `tests/unit/test_phase9_mutation.py::test_mutation_cannot_occur_without_continue_instruction` |
+| AC-020 | Approved disposable namespace integration path uses fake MCP mutation clients | `tests/unit/test_phase9_mutation.py::test_approved_disposable_namespace_k8s_mutation_executes_after_all_gates` |

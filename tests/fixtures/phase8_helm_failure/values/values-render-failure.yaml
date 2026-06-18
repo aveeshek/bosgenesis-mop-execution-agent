@@ -1,0 +1,4 @@
+global:
+  namespace: signoz
+image:
+  tag: render-failure-fixture

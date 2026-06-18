@@ -84,18 +84,18 @@ Goal: enforce guardrails before execution exists. Requirement coverage: `[FR-015
 
 Goal: expose deterministic job control APIs and MCP tools. Requirement coverage: `[FR-001] [FR-002] [FR-003] [FR-004] [FR-005] [FR-037] [FR-038] [FR-039]`.
 
-- [ ] [FR-038] Implement `/healthz`, `/readyz`, `/v1/capabilities`, and `/v1/config/effective`.
-- [ ] [FR-001] Implement artifact bundle endpoints under `/v1/artifact-bundles`.
-- [ ] [FR-001] Implement `POST /v1/execution-jobs`.
-- [ ] [FR-002] Implement job, plan, observation, event, audit, memory-context, and report retrieval endpoints.
-- [ ] [FR-003] Implement external instruction submission endpoint.
-- [ ] [FR-004] Implement human approval submission endpoint.
-- [ ] [FR-005] Implement start, pause, resume, cancel, and rollback request endpoints.
-- [ ] [FR-039] Implement report list/download metadata endpoints.
-- [ ] [FR-037] Implement MCP server tools mirroring REST: health, capabilities, register/validate bundle, create/get/list/start/pause/resume/cancel job, submit instruction/approval, get plan/decision/observations/audit/memory, evaluate policy, request rollback, generate release notes.
-- [ ] [FR-037] Ensure every MCP tool returns the standard result envelope.
-- [ ] [FR-038] Add auth dependency placeholder and redacted config behavior.
-- [ ] [FR-001][FR-037] Add REST and MCP contract tests based on `OPENAPI.yaml` and `mcp_tool_contract.json`.
+- [x] [FR-038] Implement `/healthz`, `/readyz`, `/v1/capabilities`, and `/v1/config/effective`.
+- [x] [FR-001] Implement artifact bundle endpoints under `/v1/artifact-bundles`.
+- [x] [FR-001] Implement `POST /v1/execution-jobs`.
+- [x] [FR-002] Implement job, plan, observation, event, audit, memory-context, and report retrieval endpoints.
+- [x] [FR-003] Implement external instruction submission endpoint.
+- [x] [FR-004] Implement human approval submission endpoint.
+- [x] [FR-005] Implement start, pause, resume, cancel, and rollback request endpoints.
+- [x] [FR-039] Implement report list/download metadata endpoints.
+- [x] [FR-037] Implement MCP server tools mirroring REST: health, capabilities, register/validate bundle, create/get/list/start/pause/resume/cancel job, submit instruction/approval, get plan/decision/observations/audit/memory, evaluate policy, request rollback, generate release notes.
+- [x] [FR-037] Ensure every MCP tool returns the standard result envelope.
+- [x] [FR-038] Add auth dependency placeholder and redacted config behavior.
+- [x] [FR-001][FR-037] Add REST and MCP contract tests based on `OPENAPI.yaml` and `mcp_tool_contract.json`.
 
 ## Phase 6 - MCP Client Contracts
 
@@ -113,41 +113,41 @@ Goal: implement typed clients for governed MCP integrations. Requirement coverag
 
 Goal: execute plan phases and steps as a long-running external-control worker. Requirement coverage: `[FR-013] [FR-014] [FR-025] [FR-028] [FR-029] [FR-031] [FR-032] [AC-011] [AC-012] [AC-013] [AC-018] [AC-021] [AC-024]`.
 
-- [ ] [FR-025] Implement queue and worker loop.
-- [ ] [FR-013] Implement phase dependency scheduler and step selector.
-- [ ] [FR-005] Implement pause, resume, cancel, and safe-stop handling.
-- [ ] [FR-032] Implement wait/poll executor and timeout handling.
-- [ ] [FR-028] Implement observation builder for state transitions, policy checks, MCP calls, dry-runs, mutations, validations, waits, errors, and memory writes.
-- [ ] [FR-029] Implement decision-required context builder.
-- [ ] [AC-021] Implement worker restart recovery.
-- [ ] [FR-031][AC-024] Integrate target namespace lock acquisition/release.
-- [ ] [FR-014] Ensure any failure, ambiguity, unexpected state, or policy issue pauses instead of reasoning.
-- [ ] [AC-011][AC-012][AC-013][AC-018] Add runtime tests for long waits, timeouts, restarts, cancellations, and decision-required states.
+- [x] [FR-025] Implement queue and worker loop.
+- [x] [FR-013] Implement phase dependency scheduler and step selector.
+- [x] [FR-005] Implement pause, resume, cancel, and safe-stop handling.
+- [x] [FR-032] Implement wait/poll executor and timeout handling.
+- [x] [FR-028] Implement observation builder for state transitions, policy checks, MCP calls, dry-runs, mutations, validations, waits, errors, and memory writes.
+- [x] [FR-029] Implement decision-required context builder.
+- [x] [AC-021] Implement worker restart recovery.
+- [x] [FR-031][AC-024] Integrate target namespace lock acquisition/release.
+- [x] [FR-014] Ensure any failure, ambiguity, unexpected state, or policy issue pauses instead of reasoning.
+- [x] [AC-011][AC-012][AC-013][AC-018] Add runtime tests for long waits, timeouts, restarts, cancellations, and decision-required states.
 
 ## Phase 8 - Dry-Run Execution Path
 
 Goal: safely execute dry-runs and preflight checks end to end. Requirement coverage: `[FR-015] [FR-021] [FR-022] [FR-028] [FR-040] [AC-004] [AC-012] [AC-015]`.
 
-- [ ] [FR-015] Map plan command kinds to Kubernetes or Helm dry-run actions.
-- [ ] [FR-021] Implement Kubernetes server-side dry-run apply executor.
-- [ ] [FR-022] Implement Helm template and dry-run install/upgrade executor.
-- [ ] [FR-040] Implement `dry_run_only` job mode that never mutates.
-- [ ] [FR-028] Persist dry-run outputs as redacted observations.
-- [ ] [AC-004] Add dry-run-only E2E test using sample bundle.
-- [ ] [AC-012][AC-015] Add YAML syntax error and Helm render failure dry-run fixtures.
+- [x] [FR-015] Map plan command kinds to Kubernetes or Helm dry-run actions.
+- [x] [FR-021] Implement Kubernetes server-side dry-run apply executor.
+- [x] [FR-022] Implement Helm template and dry-run install/upgrade executor.
+- [x] [FR-040] Implement `dry_run_only` job mode that never mutates.
+- [x] [FR-028] Persist dry-run outputs as redacted observations.
+- [x] [AC-004] Add dry-run-only E2E test using sample bundle.
+- [x] [AC-012][AC-015] Add YAML syntax error and Helm render failure dry-run fixtures.
 
 ## Phase 9 - Approved Mutation Execution Path
 
 Goal: execute namespace-scoped mutations only when all gates pass. Requirement coverage: `[FR-016] [FR-017] [FR-018] [FR-021] [FR-022] [AC-005] [AC-006] [AC-007] [AC-008] [AC-019] [AC-020]`.
 
-- [ ] [FR-016][FR-017] Implement mutation gate pipeline: state, instruction, dry-run, approval, namespace, policy, lock, idempotency, and audit pre-event.
-- [ ] [FR-021] Implement Kubernetes apply executor.
-- [ ] [FR-022] Implement Helm install/upgrade executor.
-- [ ] [FR-028] Persist mutation observations and resource mutation records.
-- [ ] [NFR-001] Implement unknown mutation outcome handling.
-- [ ] [AC-020] Add approved disposable namespace integration test.
-- [ ] [AC-005][AC-006][AC-007][AC-008] Add tests proving mutation cannot occur without dry-run, approval, matching scope, and target namespace.
-- [ ] [FR-030] Add duplicate instruction/request idempotency tests.
+- [x] [FR-016][FR-017] Implement mutation gate pipeline: state, instruction, dry-run, approval, namespace, policy, lock, idempotency, and audit pre-event.
+- [x] [FR-021] Implement Kubernetes apply executor.
+- [x] [FR-022] Implement Helm install/upgrade executor.
+- [x] [FR-028] Persist mutation observations and resource mutation records.
+- [x] [NFR-001] Implement unknown mutation outcome handling.
+- [x] [AC-020] Add approved disposable namespace integration test.
+- [x] [AC-005][AC-006][AC-007][AC-008] Add tests proving mutation cannot occur without dry-run, approval, matching scope, and target namespace.
+- [x] [FR-030] Add duplicate instruction/request idempotency tests.
 
 ## Phase 10 - Failure Injection and External LLM Loop
 

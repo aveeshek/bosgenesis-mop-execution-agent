@@ -100,7 +100,7 @@ def test_mcp_policy_tool_call_reports_blocks() -> None:
     }
 
 
-def test_mcp_unimplemented_tool_returns_structured_error() -> None:
+def test_mcp_create_job_tool_returns_standard_envelope() -> None:
     client = TestClient(create_app())
 
     response = client.post(
@@ -109,16 +109,24 @@ def test_mcp_unimplemented_tool_returns_structured_error() -> None:
             "jsonrpc": "2.0",
             "id": 5,
             "method": "tools/call",
-            "params": {"name": "mop_execution_create_job", "arguments": {}},
+            "params": {
+                "name": "mop_execution_create_job",
+                "arguments": {
+                    "bundle_id": "bundle-1",
+                    "target_namespace": "target-ns",
+                    "job_name": "smoke",
+                },
+            },
         },
     )
 
     result = response.json()["result"]
     envelope = result["structuredContent"]
     assert response.status_code == 200
-    assert result["isError"] is True
-    assert envelope["ok"] is False
-    assert envelope["policy_blocks"][0]["code"] == "TOOL_NOT_IMPLEMENTED"
+    assert result["isError"] is False
+    assert envelope["ok"] is True
+    assert envelope["state"] == "created"
+    assert envelope["data"]["job"]["target_namespace"] == "target-ns"
 
 
 def test_mcp_malformed_json_returns_parse_error() -> None:

@@ -110,6 +110,13 @@ class JsonExecutionRepository:
         payload = self._snapshot.instructions.get(instruction_id)
         return ExternalInstruction.model_validate(payload) if payload else None
 
+    def get_instructions(self, job_id: str) -> list[ExternalInstruction]:
+        return [
+            ExternalInstruction.model_validate(payload)
+            for payload in self._snapshot.instructions.values()
+            if payload.get("job_id") == job_id
+        ]
+
     def save_approval(self, approval: HumanApproval) -> None:
         self._snapshot.approvals[approval.approval_id] = approval.model_dump(mode="json")
         self._flush()
@@ -117,6 +124,13 @@ class JsonExecutionRepository:
     def get_approval(self, approval_id: str) -> HumanApproval | None:
         payload = self._snapshot.approvals.get(approval_id)
         return HumanApproval.model_validate(payload) if payload else None
+
+    def get_approvals(self, job_id: str) -> list[HumanApproval]:
+        return [
+            HumanApproval.model_validate(payload)
+            for payload in self._snapshot.approvals.values()
+            if payload.get("job_id") == job_id
+        ]
 
     def append_audit_event(self, audit_event: AuditEvent) -> None:
         if any(

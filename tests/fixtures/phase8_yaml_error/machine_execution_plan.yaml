@@ -1,0 +1,27 @@
+schema_version: "0.1.0"
+target_namespace: signoz
+executor_contract:
+  parse_this_block_first: true
+  dry_run_before_mutation: true
+  human_approval_before_mutation: true
+  never_copy_secret_values: true
+  target_namespace_only: signoz
+dependency_graph:
+  - phase_id: apply_configmaps
+    depends_on: []
+phases:
+  - phase_id: apply_configmaps
+    title: Apply invalid YAML
+    objective: Prove invalid YAML fails closed before mutation.
+    depends_on: []
+    steps:
+      - step_id: apply-invalid-yaml
+        title: Apply invalid YAML
+        type: k8s_apply
+        manifest_refs:
+          - generated/invalid-configmap.yaml
+        commands:
+          - kind: dry_run
+            command: k8s.server_side_dry_run_apply generated/invalid-configmap.yaml
+            dry_run: true
+            mutating: false

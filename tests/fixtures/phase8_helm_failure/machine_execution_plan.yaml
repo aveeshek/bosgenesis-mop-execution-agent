@@ -1,0 +1,31 @@
+schema_version: "0.1.0"
+target_namespace: signoz
+executor_contract:
+  parse_this_block_first: true
+  dry_run_before_mutation: true
+  human_approval_before_mutation: true
+  never_copy_secret_values: true
+  target_namespace_only: signoz
+dependency_graph:
+  - phase_id: install_helm
+    depends_on: []
+phases:
+  - phase_id: install_helm
+    title: Render failing Helm release
+    objective: Prove Helm render failure pauses before mutation.
+    depends_on: []
+    steps:
+      - step_id: helm-render-failure
+        title: Helm render failure
+        type: helm_install
+        values_refs:
+          - values/values-render-failure.yaml
+        commands:
+          - kind: dry_run
+            command: helm upgrade --install signoz signoz/signoz -n signoz -f values/values-render-failure.yaml --dry-run
+            dry_run: true
+            mutating: false
+          - kind: install
+            command: helm upgrade --install signoz signoz/signoz -n signoz -f values/values-render-failure.yaml
+            dry_run: false
+            mutating: true
