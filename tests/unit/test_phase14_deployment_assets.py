@@ -10,6 +10,11 @@ def test_helm_chart_defines_runtime_units_and_config() -> None:
     assert "name: bosgenesis-mop-execution-agent" in chart
     assert "workerConcurrency" in values
     assert "namespaceLockLeaseSeconds" in values
+    assert 'memoryEnabled: "true"' in values
+    assert 'memoryPostgresEnabled: "true"' in values
+    assert 'postgresEnabled: "true"' in values
+    assert 'postgresSchema: "mop_execution"' in values
+    assert "postgresDsnSecret" in values
     assert "databaseUrlSecret" in values
     assert "redisUrlSecret" in values
     assert "maxParallelJobsPerNamespace" in values
@@ -53,6 +58,22 @@ def test_deployment_docs_include_runbook_and_sample_requests() -> None:
     samples = Path("docs/SAMPLE_REQUESTS.md").read_text(encoding="utf-8")
 
     assert "migrations/postgres/0001_phase2_core.sql" in deployment
+    assert "migrations/postgres/0002_phase11_memory.sql" in deployment
+    assert "POSTGRES_DSN" in deployment
+    assert "memoryEnabled" in deployment
     assert "./playbook/deploy.sh" in runbook
     assert "/v1/execution-jobs" in samples
     assert "dry_run_only" in samples
+
+
+def test_helm_templates_enable_memory_and_creation_agent_postgres_convention() -> None:
+    configmap = (CHART_ROOT / "templates" / "configmap.yaml").read_text(encoding="utf-8")
+    secret_env = (CHART_ROOT / "templates" / "_secret-env.tpl").read_text(encoding="utf-8")
+    credentials = (CHART_ROOT / "values.credentials.example.yaml").read_text(encoding="utf-8")
+
+    assert "MEMORY_ENABLED" in configmap
+    assert "MEMORY_POSTGRES_ENABLED" in configmap
+    assert "POSTGRES_ENABLED" in configmap
+    assert "POSTGRES_SCHEMA" in configmap
+    assert "POSTGRES_DSN" in secret_env
+    assert "postgresql.bosgenesis.svc.cluster.local:5432/bosgenesis" in credentials

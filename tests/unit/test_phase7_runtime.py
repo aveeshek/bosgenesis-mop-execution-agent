@@ -6,6 +6,7 @@ from pathlib import Path
 from bosgenesis_mop_execution_agent.common.time import utc_now
 from bosgenesis_mop_execution_agent.models import (
     ExecutionJob,
+    ExecutionMode,
     ExecutionPhase,
     ExecutionStep,
     JobState,
@@ -160,6 +161,62 @@ def test_scheduler_respects_phase_and_step_dependencies() -> None:
 
     assert scheduler.select_next_step(phases, steps) is not None
     assert scheduler.select_next_step(phases, blocked_steps) is None
+
+
+def test_worker_completes_empty_dependency_phase(tmp_path: Path) -> None:
+    repo, runtime, _ = _runtime(tmp_path)
+    job = _job(state=JobState.DRY_RUN_READY)
+    repo.save_job(job)
+    repo.save_phase(_phase(job.job_id, phase_id="phase-a", status=PhaseStatus.COMPLETED))
+    repo.save_phase(_phase(job.job_id, phase_id="phase-empty", depends_on=["phase-a"]))
+    repo.save_phase(_phase(job.job_id, phase_id="phase-b", depends_on=["phase-empty"]))
+    repo.save_step(
+        _step(
+            job.job_id,
+            phase_id="phase-b",
+            step_id="step-b",
+            step_type=StepType.CONTEXT_CHECK,
+            depends_on=["phase-empty"],
+        )
+    )
+    runtime.enqueue(job.job_id)
+
+    assert runtime.run_once().action == "dry_run_started"
+    assert runtime.run_once().action == "empty_phase_completed"
+    assert runtime.run_once().action == "step_completed"
+
+    phases = {phase.phase_id: phase for phase in repo.get_phases(job.job_id)}
+    assert phases["phase-empty"].status == PhaseStatus.COMPLETED
+    assert repo.get_steps(job.job_id)[0].state == StepState.DRY_RUN_SUCCEEDED
+
+
+def test_worker_releases_lock_while_awaiting_approval(tmp_path: Path) -> None:
+    repo, runtime, redis_client = _runtime(tmp_path)
+    job = _job(state=JobState.DRY_RUN_READY).model_copy(
+        update={"execution_mode": ExecutionMode.EXECUTE_AFTER_APPROVAL}
+    )
+    repo.save_job(job)
+    repo.save_phase(_phase(job.job_id))
+    repo.save_step(_step(job.job_id, step_type=StepType.K8S_APPLY))
+    runtime.enqueue(job.job_id)
+
+    assert runtime.run_once().action == "dry_run_started"
+    step = repo.get_steps(job.job_id)[0]
+    repo.save_step(
+        step.model_copy(
+            update={
+                "state": StepState.DRY_RUN_SUCCEEDED,
+                "dry_run_status": StepState.DRY_RUN_SUCCEEDED,
+            }
+        )
+    )
+    decision = runtime.run_once()
+
+    stored = repo.get_job(job.job_id)
+    assert decision.action == "awaiting_human_approval"
+    assert stored is not None
+    assert stored.state == JobState.AWAITING_HUMAN_APPROVAL
+    assert redis_client.get(namespace_lock_key(job.target_namespace)) is None
 
 
 def _runtime(

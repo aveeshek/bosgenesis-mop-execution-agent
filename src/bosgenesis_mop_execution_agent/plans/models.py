@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 
 from bosgenesis_mop_execution_agent.models.base import StrictBaseModel
 
+SUPPORTED_MACHINE_PLAN_SCHEMA_VERSIONS = {"0.1.0", "1.0"}
 SUPPORTED_MACHINE_PLAN_SCHEMA_VERSION = "0.1.0"
 
 
@@ -77,7 +78,7 @@ class MachineExecutionPlan(StrictBaseModel):
 
     @model_validator(mode="after")
     def validate_schema_version(self) -> MachineExecutionPlan:
-        if self.schema_version != SUPPORTED_MACHINE_PLAN_SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_MACHINE_PLAN_SCHEMA_VERSIONS:
             msg = f"unsupported_machine_plan_schema:{self.schema_version}"
             raise ValueError(msg)
         return self

@@ -40,6 +40,13 @@ def test_invalid_transition_is_rejected() -> None:
     assert exc_info.value.to_state == JobState.EXECUTING
 
 
+def test_validating_bundle_allows_operator_pause_and_cancel() -> None:
+    machine = StateMachine()
+
+    assert JobState.PAUSED in machine.allowed_targets(JobState.VALIDATING_BUNDLE)
+    assert JobState.CANCELLED in machine.allowed_targets(JobState.VALIDATING_BUNDLE)
+
+
 def test_terminal_states_have_no_outbound_transitions() -> None:
     machine = StateMachine()
 

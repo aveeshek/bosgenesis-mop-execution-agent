@@ -130,7 +130,9 @@ class DryRunExecutor:
                         success=False,
                         action="k8s.server_side_dry_run_apply",
                         outputs=outputs,
-                        error_code=ErrorCode.DRY_RUN_FAILED,
+                        error_code=result.error.error_code
+                        if result.error
+                        else ErrorCode.DRY_RUN_FAILED,
                         message=result.error.message if result.error else "k8s_dry_run_failed",
                     )
 
@@ -201,7 +203,9 @@ class DryRunExecutor:
                 success=False,
                 action="helm.dry_run_install_upgrade",
                 outputs=outputs,
-                error_code=ErrorCode.DRY_RUN_FAILED,
+                error_code=dry_run_result.error.error_code
+                if dry_run_result.error
+                else ErrorCode.DRY_RUN_FAILED,
                 message=dry_run_result.error.message
                 if dry_run_result.error
                 else "helm_dry_run_failed",

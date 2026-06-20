@@ -25,6 +25,12 @@ from bosgenesis_mop_execution_agent.models.instructions import (
     InstructionType,
     RetryPolicy,
 )
+from bosgenesis_mop_execution_agent.models.memory import (
+    MEMORY_AUTHORITY,
+    MemoryLayer,
+    MemoryQuery,
+    MemoryRecord,
+)
 from bosgenesis_mop_execution_agent.models.observations import Observation
 from bosgenesis_mop_execution_agent.models.policies import PolicyBlock, PolicySeverity
 from bosgenesis_mop_execution_agent.models.reports import ReportArtifact
@@ -45,6 +51,10 @@ __all__ = [
     "HumanApproval",
     "InstructionType",
     "JobState",
+    "MEMORY_AUTHORITY",
+    "MemoryLayer",
+    "MemoryQuery",
+    "MemoryRecord",
     "Observation",
     "ObservationSeverity",
     "ObservationType",

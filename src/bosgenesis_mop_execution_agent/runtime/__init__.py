@@ -2,6 +2,7 @@
 
 from bosgenesis_mop_execution_agent.runtime.decision_context import DecisionContextBuilder
 from bosgenesis_mop_execution_agent.runtime.dry_run import DryRunActionResult, DryRunExecutor
+from bosgenesis_mop_execution_agent.runtime.instructions import InstructionDecision, InstructionGate
 from bosgenesis_mop_execution_agent.runtime.mutation import MutationActionResult, MutationExecutor
 from bosgenesis_mop_execution_agent.runtime.observations import ObservationBuilder
 from bosgenesis_mop_execution_agent.runtime.queue import InMemoryJobQueue, QueuedJob
@@ -14,6 +15,8 @@ __all__ = [
     "DryRunActionResult",
     "DryRunExecutor",
     "InMemoryJobQueue",
+    "InstructionDecision",
+    "InstructionGate",
     "MutationActionResult",
     "MutationExecutor",
     "ObservationBuilder",

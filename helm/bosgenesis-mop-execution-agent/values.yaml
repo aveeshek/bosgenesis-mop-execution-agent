@@ -52,8 +52,16 @@ config:
   dataIngestionMcpEndpoint: "http://bosgenesis-k8s-data-ingestion-agent.bosgenesis.svc.cluster.local:8080"
   mopCreationAgentEndpoint: "http://bosgenesis-mop-creation-agent.bosgenesis.svc.cluster.local:8080"
   releaseNoteAgentEndpoint: "http://bosgenesis-release-note-agent-api.bosgenesis.svc.cluster.local:8080"
+  memoryEnabled: "true"
+  memoryAuthority: "context_only_not_decision_authority"
+  memoryPostgresEnabled: "true"
+  postgresEnabled: "true"
+  postgresSchema: "mop_execution"
 
 external:
+  postgresDsnSecret:
+    name: ""
+    key: POSTGRES_DSN
   databaseUrlSecret:
     name: ""
     key: DATABASE_URL
@@ -72,6 +80,12 @@ external:
   langfuseSecretKeySecret:
     name: ""
     key: LANGFUSE_SECRET_KEY
+  k8sInspectorApiKeySecret:
+    name: ""
+    key: BOSGENESIS_API_KEY
+  helmManagerApiKeySecret:
+    name: ""
+    key: BOSGENESIS_API_KEY
 
 api:
   enabled: true
@@ -114,7 +128,7 @@ migrations:
   command:
     - /bin/sh
     - -c
-    - "echo 'Run migrations/postgres/0001_phase2_core.sql with the platform migration runner.'"
+    - "echo 'Run migrations/postgres/0001_phase2_core.sql and migrations/postgres/0002_phase11_memory.sql with the platform migration runner.'"
 
 persistence:
   enabled: true
@@ -122,6 +136,11 @@ persistence:
     - ReadWriteOnce
   size: 5Gi
   storageClassName: ""
+
+artifactBundles:
+  existingClaim: ""
+  mountPath: /data/mops
+  readOnly: true
 
 rbac:
   create: true

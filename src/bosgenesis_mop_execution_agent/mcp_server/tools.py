@@ -106,7 +106,7 @@ def call_tool(
     elif name == "mop_execution_list_audit_events":
         envelope = effective_service.list_audit_events(str(args.get("job_id", "")))
     elif name == "mop_execution_get_memory_context":
-        envelope = effective_service.memory_context(str(args.get("job_id", "")))
+        envelope = effective_service.memory_context(str(args.get("job_id", "")), args)
     elif name == "mop_execution_request_rollback":
         envelope = effective_service.request_rollback(str(args.get("job_id", "")), args)
     elif name == "mop_execution_generate_release_notes":
@@ -195,6 +195,17 @@ def _tool_properties(name: str) -> dict[str, Any]:
         "mop_execution_request_rollback",
         "mop_execution_generate_release_notes",
     }:
+        if name == "mop_execution_get_memory_context":
+            return {
+                "job_id": {"type": "string"},
+                "namespace": {"type": "string"},
+                "chart": {"type": "string"},
+                "kind": {"type": "string"},
+                "error_code": {"type": "string"},
+                "mcp_source": {"type": "string"},
+                "tenant": {"type": "string"},
+                "environment": {"type": "string"},
+            }
         return {"job_id": {"type": "string"}}
     if name in {"mop_execution_register_bundle", "mop_execution_validate_bundle"}:
         return {

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: phase10-failure-fixture
+  namespace: phase10-target
+data:
+  mode: failure-injection

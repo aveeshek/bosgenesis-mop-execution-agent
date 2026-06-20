@@ -34,7 +34,9 @@ ALLOWED_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
             JobState.AWAITING_LLM_INSTRUCTION,
             JobState.DECISION_REQUIRED,
             JobState.DRY_RUN_READY,
+            JobState.PAUSED,
             JobState.FAILED,
+            JobState.CANCELLED,
         }
     ),
     JobState.INVALID_BUNDLE: frozenset({JobState.CANCELLED}),

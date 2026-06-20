@@ -1,0 +1,31 @@
+schema_version: "0.1.0"
+target_namespace: phase10-target
+executor_contract:
+  parse_this_block_first: true
+  dry_run_before_mutation: true
+  human_approval_before_mutation: true
+  never_copy_secret_values: true
+  target_namespace_only: phase10-target
+dependency_graph:
+  - phase_id: apply_failure_fixture
+    depends_on: []
+phases:
+  - phase_id: apply_failure_fixture
+    title: Failure injection fixture
+    objective: Exercise deterministic pause and external LLM loop.
+    depends_on: []
+    steps:
+      - step_id: apply-failure-fixture
+        title: Apply failure fixture
+        type: k8s_apply
+        manifest_refs:
+          - generated/configmap-failure-fixture.yaml
+        commands:
+          - kind: dry_run
+            command: k8s.server_side_dry_run_apply generated/configmap-failure-fixture.yaml
+            dry_run: true
+            mutating: false
+          - kind: apply
+            command: kubectl apply -f generated/configmap-failure-fixture.yaml -n phase10-target
+            dry_run: false
+            mutating: true

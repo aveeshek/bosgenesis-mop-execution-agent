@@ -26,7 +26,11 @@ def load_and_validate_bundle(source: BundleSource, target_namespace: str) -> Art
     """Resolve, load, and validate a MoP output bundle."""
     root = resolve_bundle_source(source)
     plan_path = root / "machine_execution_plan.yaml"
-    installation_notes = _read_optional_text(root, "machine-readable-installation-notes.md")
+    installation_notes = _read_optional_text(
+        root,
+        "machine-readable-installation-notes.md",
+        "*.installation.md",
+    )
     if plan_path.exists():
         plan = parse_machine_plan(plan_path)
     elif installation_notes:
@@ -41,7 +45,7 @@ def load_and_validate_bundle(source: BundleSource, target_namespace: str) -> Art
         msg = f"machine_plan_target_namespace_mismatch:{plan.target_namespace}"
         raise BundleValidationError(msg)
 
-    human_mop = _read_optional_text(root, "human-readable-mop.md")
+    human_mop = _read_optional_text(root, "human-readable-mop.md", "*.human-mop.md")
     artifact_json = _read_optional_json(root, "artifact.json")
     artifact_index_json = _read_optional_json(root, "artifact-index.json")
     response_json = _read_optional_json(root, "response.json")
@@ -69,10 +73,16 @@ def load_and_validate_bundle(source: BundleSource, target_namespace: str) -> Art
     )
 
 
-def _read_optional_text(root: Path, filename: str) -> str | None:
+def _read_optional_text(root: Path, filename: str, *fallback_globs: str) -> str | None:
     path = root / filename
     if not path.exists():
-        return None
+        for pattern in fallback_globs:
+            matches = sorted(root.glob(pattern))
+            if matches:
+                path = matches[0]
+                break
+        else:
+            return None
     return path.read_text(encoding="utf-8")
 
 

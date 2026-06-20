@@ -20,6 +20,8 @@ from bosgenesis_mop_execution_agent.models import (
     ExecutionStep,
     ExternalInstruction,
     HumanApproval,
+    MemoryQuery,
+    MemoryRecord,
     Observation,
     ReportArtifact,
 )
@@ -36,6 +38,7 @@ class RepositorySnapshot(StrictBaseModel):
     instructions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     approvals: dict[str, dict[str, Any]] = Field(default_factory=dict)
     audit_events: list[dict[str, Any]] = Field(default_factory=list)
+    memory_records: dict[str, dict[str, Any]] = Field(default_factory=dict)
     reports: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
@@ -149,6 +152,18 @@ class JsonExecutionRepository:
             if job_id is None or payload.get("job_id") == job_id
         ]
 
+    def save_memory_record(self, record: MemoryRecord) -> None:
+        self._snapshot.memory_records[record.memory_id] = record.model_dump(mode="json")
+        self._flush()
+
+    def list_memory_records(self, query: MemoryQuery | None = None) -> list[MemoryRecord]:
+        memory_query = query or MemoryQuery()
+        records = [
+            MemoryRecord.model_validate(payload)
+            for payload in self._snapshot.memory_records.values()
+        ]
+        return [record for record in records if _matches_memory(record, memory_query)]
+
     def save_report(self, report: ReportArtifact) -> None:
         self._snapshot.reports[report.report_id] = report.model_dump(mode="json")
         self._flush()
@@ -173,3 +188,10 @@ class JsonExecutionRepository:
 
 def _compound_key(left: str, right: str) -> str:
     return f"{left}:{right}"
+
+
+def _matches_memory(record: MemoryRecord, query: MemoryQuery) -> bool:
+    for field_name, expected in query.model_dump(exclude_none=True).items():
+        if getattr(record, field_name) != expected:
+            return False
+    return True

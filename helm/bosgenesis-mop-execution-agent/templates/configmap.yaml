@@ -32,3 +32,8 @@ data:
   K8S_DATA_INGESTION_MCP_ENDPOINT: {{ .Values.config.dataIngestionMcpEndpoint | quote }}
   MOP_CREATION_AGENT_ENDPOINT: {{ .Values.config.mopCreationAgentEndpoint | quote }}
   RELEASE_NOTE_AGENT_ENDPOINT: {{ .Values.config.releaseNoteAgentEndpoint | quote }}
+  MEMORY_ENABLED: {{ .Values.config.memoryEnabled | quote }}
+  MEMORY_AUTHORITY: {{ .Values.config.memoryAuthority | quote }}
+  MEMORY_POSTGRES_ENABLED: {{ .Values.config.memoryPostgresEnabled | quote }}
+  POSTGRES_ENABLED: {{ .Values.config.postgresEnabled | quote }}
+  POSTGRES_SCHEMA: {{ .Values.config.postgresSchema | quote }}

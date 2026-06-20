@@ -37,6 +37,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- if .Values.artifactBundles.existingClaim }}
+            - name: artifact-bundles
+              mountPath: {{ .Values.artifactBundles.mountPath | quote }}
+              readOnly: {{ .Values.artifactBundles.readOnly }}
+            {{- end }}
           resources:
             {{- toYaml .Values.reconciler.resources | nindent 12 }}
           securityContext:
@@ -49,4 +54,10 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.artifactBundles.existingClaim }}
+        - name: artifact-bundles
+          persistentVolumeClaim:
+            claimName: {{ .Values.artifactBundles.existingClaim }}
+            readOnly: {{ .Values.artifactBundles.readOnly }}
+        {{- end }}
 {{- end }}

@@ -1,4 +1,11 @@
 {{- define "bosgenesis-mop-execution-agent.secretEnv" -}}
+{{- if .Values.external.postgresDsnSecret.name }}
+- name: POSTGRES_DSN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.external.postgresDsnSecret.name }}
+      key: {{ .Values.external.postgresDsnSecret.key }}
+{{- end }}
 {{- if .Values.external.databaseUrlSecret.name }}
 - name: DATABASE_URL
   valueFrom:
@@ -40,5 +47,19 @@
     secretKeyRef:
       name: {{ .Values.external.langfuseSecretKeySecret.name }}
       key: {{ .Values.external.langfuseSecretKeySecret.key }}
+{{- end }}
+{{- if .Values.external.k8sInspectorApiKeySecret.name }}
+- name: K8S_INSPECTOR_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.external.k8sInspectorApiKeySecret.name }}
+      key: {{ .Values.external.k8sInspectorApiKeySecret.key }}
+{{- end }}
+{{- if .Values.external.helmManagerApiKeySecret.name }}
+- name: HELM_MANAGER_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.external.helmManagerApiKeySecret.name }}
+      key: {{ .Values.external.helmManagerApiKeySecret.key }}
 {{- end }}
 {{- end -}}

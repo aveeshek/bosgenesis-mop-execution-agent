@@ -80,7 +80,7 @@ def _approval_matches(
         return False
     if approval.approved_step_ids and step_id not in approval.approved_step_ids:
         return False
-    if approval.command_fingerprint != fingerprint:
+    if approval.command_fingerprint and approval.command_fingerprint != fingerprint:
         return False
     if approval.approved_resource_refs:
         return _resources_covered(approval.approved_resource_refs, resource_refs, target_namespace)

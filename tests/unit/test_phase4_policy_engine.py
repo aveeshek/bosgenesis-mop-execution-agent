@@ -102,6 +102,43 @@ def test_matching_approval_scope_fingerprint_idempotency_and_audit_allows_mutati
     assert decision.command_fingerprint == fingerprint
 
 
+def test_broad_mutation_approval_without_fingerprint_allows_mutation() -> None:
+    command = "kubectl apply -f generated/configmap.yaml"
+    request_payload = {"command": command, "step_id": "step-1"}
+    approval = HumanApproval(
+        approval_id="approval-1",
+        job_id="job-1",
+        approver_id="operator@example.com",
+        approval_scope=ApprovalScope.MUTATION,
+        ticket_reference="CHG-1",
+        statement="Approved for POC mutation.",
+        expires_at=NOW + timedelta(hours=1),
+    )
+    idempotency = IdempotencyRecord(
+        idempotency_key="idem-1",
+        scope="mutation",
+        request_hash=stable_hash(request_payload),
+    )
+
+    decision = evaluate_policy(
+        PolicyEvaluationContext(
+            job_id="job-1",
+            target_namespace="target-ns",
+            mutating=True,
+            step_id="step-1",
+            command=command,
+            approvals=[approval],
+            dry_run_satisfied=True,
+            idempotency_record=idempotency,
+            request_payload=request_payload,
+            audit_written=True,
+            now=NOW,
+        )
+    )
+
+    assert decision.allowed
+
+
 def test_approval_scope_mismatch_and_expiration_are_blocked() -> None:
     command = "kubectl apply -f generated/configmap.yaml"
     approval = HumanApproval(

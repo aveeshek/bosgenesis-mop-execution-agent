@@ -153,32 +153,32 @@ Goal: execute namespace-scoped mutations only when all gates pass. Requirement c
 
 Goal: prove the worker pauses and waits for explicit instruction. Requirement coverage: `[FR-003] [FR-014] [FR-029] [AC-011] [AC-012] [AC-013] [AC-014] [AC-015] [AC-016] [AC-017] [AC-018] [AC-019] [NFR-011]`.
 
-- [ ] [FR-029] Implement decision-required endpoint and context packaging.
-- [ ] [FR-003] Implement instruction validation and acceptance/rejection flow.
-- [ ] [FR-026] Write audit events for instruction received, accepted, rejected, and policy-blocked.
-- [ ] [AC-011] Add YAML syntax error fixture.
-- [ ] [AC-012] Add dry-run failure fixture.
-- [ ] [AC-013] Add resource already exists fixture.
-- [ ] [AC-014] Add immutable field conflict fixture.
-- [ ] [AC-015] Add Helm render failure fixture.
-- [ ] [AC-016] Add PVC pending and pod unschedulable fixtures.
-- [ ] [AC-017] Add node unavailable fixture.
-- [ ] [AC-018] Add validation failure fixture.
-- [ ] [NFR-011] Add ingress conflict, MCP outage, and timeout fixtures.
-- [ ] [FR-014] For each fixture, assert worker pauses, emits correct reason code, captures redacted observations, labels memory as non-authoritative, and performs no repair without instruction.
-- [ ] [AC-019] Add tests where valid external instructions resume safely.
-- [ ] [AC-019] Add tests where unsafe instructions are blocked.
+- [x] [FR-029] Implement decision-required endpoint and context packaging.
+- [x] [FR-003] Implement instruction validation and acceptance/rejection flow.
+- [x] [FR-026] Write audit events for instruction received, accepted, rejected, and policy-blocked.
+- [x] [AC-011] Add YAML syntax error fixture.
+- [x] [AC-012] Add dry-run failure fixture.
+- [x] [AC-013] Add resource already exists fixture.
+- [x] [AC-014] Add immutable field conflict fixture.
+- [x] [AC-015] Add Helm render failure fixture.
+- [x] [AC-016] Add PVC pending and pod unschedulable fixtures.
+- [x] [AC-017] Add node unavailable fixture.
+- [x] [AC-018] Add validation failure fixture.
+- [x] [NFR-011] Add ingress conflict, MCP outage, and timeout fixtures.
+- [x] [FR-014] For each fixture, assert worker pauses, emits correct reason code, captures redacted observations, labels memory as non-authoritative, and performs no repair without instruction.
+- [x] [AC-019] Add tests where valid external instructions resume safely.
+- [x] [AC-019] Add tests where unsafe instructions are blocked.
 
 ## Phase 11 - Memory and Audit Layers
 
 Goal: implement memory as execution context only. Requirement coverage: `[FR-027] [FR-026] [FR-029] [AC-022] [AC-027] [AC-028] [NFR-003] [NFR-010]`.
 
-- [ ] [FR-027] Implement in-run, durable job, resource state, episodic execution, semantic failure, policy, approval, audit, and observability memory layers.
-- [ ] [FR-029] Add memory retrieval filters by namespace, chart, kind, error code, MCP source, tenant, and environment.
-- [ ] [AC-027] Label all memory responses as `context_only_not_decision_authority`.
-- [ ] [AC-027] Add tests proving memory cannot trigger execution or state transitions.
-- [ ] [AC-028] Add redaction tests for all memory writes.
-- [ ] [FR-026][AC-022] Add audit completeness tests for representative jobs.
+- [x] [FR-027] Implement in-run, durable job, resource state, episodic execution, semantic failure, policy, approval, audit, and observability memory layers.
+- [x] [FR-029] Add memory retrieval filters by namespace, chart, kind, error code, MCP source, tenant, and environment.
+- [x] [AC-027] Label all memory responses as `context_only_not_decision_authority`.
+- [x] [AC-027] Add tests proving memory cannot trigger execution or state transitions.
+- [x] [AC-028] Add redaction tests for all memory writes.
+- [x] [FR-026][AC-022] Add audit completeness tests for representative jobs.
 
 ## Phase 12 - Validation, Rollback, and Reports
 

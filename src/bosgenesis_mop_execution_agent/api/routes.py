@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from bosgenesis_mop_execution_agent.api.dependencies import get_api_service, require_api_actor
@@ -157,8 +157,28 @@ async def list_audit_events(
 async def get_memory_context(
     job_id: str,
     service: ApiServiceDep,
+    namespace: str | None = Query(default=None),
+    chart: str | None = Query(default=None),
+    kind: str | None = Query(default=None),
+    error_code: str | None = Query(default=None),
+    mcp_source: str | None = Query(default=None),
+    tenant: str | None = Query(default=None),
+    environment: str | None = Query(default=None),
 ) -> JSONResponse:
-    return _response(service.memory_context(job_id))
+    return _response(
+        service.memory_context(
+            job_id,
+            {
+                "namespace": namespace,
+                "chart": chart,
+                "kind": kind,
+                "error_code": error_code,
+                "mcp_source": mcp_source,
+                "tenant": tenant,
+                "environment": environment,
+            },
+        )
+    )
 
 
 @router.get("/execution-jobs/{job_id}/stream")

@@ -45,6 +45,9 @@ class PhaseStepScheduler:
                 StepState.SKIPPED_BY_INSTRUCTION,
             }
         }
+        completed_phases = {
+            phase.phase_id for phase in phases if phase.status == PhaseStatus.COMPLETED
+        }
         phase_by_id = {phase.phase_id: phase for phase in self.ready_phases(phases)}
         for phase in phase_by_id.values():
             phase_steps = sorted(
@@ -54,7 +57,10 @@ class PhaseStepScheduler:
             for step in phase_steps:
                 if step.state not in {StepState.PENDING, StepState.READY, StepState.WAITING}:
                     continue
-                if all(dep in completed_steps for dep in step.depends_on):
+                if all(
+                    dep in completed_steps or dep in completed_phases
+                    for dep in step.depends_on
+                ):
                     return phase, step
         return None
 
@@ -74,6 +80,9 @@ class PhaseStepScheduler:
                 StepState.DRY_RUN_SUCCEEDED,
                 StepState.SKIPPED_BY_INSTRUCTION,
             }
+        }
+        completed_phases = {
+            phase.phase_id for phase in phases if phase.status == PhaseStatus.COMPLETED
         }
         mutating_types = {
             StepType.K8S_APPLY,
@@ -102,7 +111,10 @@ class PhaseStepScheduler:
                     and step.dry_run_status != StepState.DRY_RUN_SUCCEEDED
                 ):
                     continue
-                if all(dep in completed_steps or dep == step.step_id for dep in step.depends_on):
+                if all(
+                    dep in completed_steps or dep in completed_phases or dep == step.step_id
+                    for dep in step.depends_on
+                ):
                     return phase, step
         return None
 

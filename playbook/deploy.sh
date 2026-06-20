@@ -32,6 +32,13 @@ API_SERVICE_NAME="${API_SERVICE_NAME:-${HELM_RELEASE}}"
 WORKER_ENABLED="${WORKER_ENABLED:-false}"
 RECONCILER_ENABLED="${RECONCILER_ENABLED:-false}"
 MIGRATIONS_ENABLED="${MIGRATIONS_ENABLED:-false}"
+ARTIFACT_BUNDLES_CLAIM="${ARTIFACT_BUNDLES_CLAIM:-bosgenesis-mop-creation-agent-mops}"
+ARTIFACT_BUNDLES_MOUNT_PATH="${ARTIFACT_BUNDLES_MOUNT_PATH:-/data/mops}"
+ARTIFACT_BUNDLES_READ_ONLY="${ARTIFACT_BUNDLES_READ_ONLY:-true}"
+K8S_INSPECTOR_API_KEY_SECRET="${K8S_INSPECTOR_API_KEY_SECRET:-bosgenesis-k8s-inspector-mcp-secret}"
+K8S_INSPECTOR_API_KEY_SECRET_KEY="${K8S_INSPECTOR_API_KEY_SECRET_KEY:-BOSGENESIS_API_KEY}"
+HELM_MANAGER_API_KEY_SECRET="${HELM_MANAGER_API_KEY_SECRET:-bosgenesis-helm-manager-mcp-secret}"
+HELM_MANAGER_API_KEY_SECRET_KEY="${HELM_MANAGER_API_KEY_SECRET_KEY:-BOSGENESIS_API_KEY}"
 
 log() {
   printf '\n[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -137,6 +144,13 @@ if [ "${DEPLOY_METHOD}" = "helm" ]; then
     --set worker.enabled="${WORKER_ENABLED}"
     --set reconciler.enabled="${RECONCILER_ENABLED}"
     --set migrations.enabled="${MIGRATIONS_ENABLED}"
+    --set artifactBundles.existingClaim="${ARTIFACT_BUNDLES_CLAIM}"
+    --set artifactBundles.mountPath="${ARTIFACT_BUNDLES_MOUNT_PATH}"
+    --set artifactBundles.readOnly="${ARTIFACT_BUNDLES_READ_ONLY}"
+    --set external.k8sInspectorApiKeySecret.name="${K8S_INSPECTOR_API_KEY_SECRET}"
+    --set external.k8sInspectorApiKeySecret.key="${K8S_INSPECTOR_API_KEY_SECRET_KEY}"
+    --set external.helmManagerApiKeySecret.name="${HELM_MANAGER_API_KEY_SECRET}"
+    --set external.helmManagerApiKeySecret.key="${HELM_MANAGER_API_KEY_SECRET_KEY}"
     --set rolloutTimestamp="${ROLLOUT_TIMESTAMP}"
   )
   if [ -n "${HELM_VALUES_FILE}" ]; then

@@ -22,7 +22,12 @@ The chart deploys:
 
 ## Migration Job
 
-The PostgreSQL schema lives in `migrations/postgres/0001_phase2_core.sql`. The Helm migration hook is disabled by default until the platform migration runner is wired to execute that SQL against the configured `DATABASE_URL`.
+The PostgreSQL schema lives in:
+
+- `migrations/postgres/0001_phase2_core.sql`
+- `migrations/postgres/0002_phase11_memory.sql`
+
+The Helm migration hook is disabled by default until the platform migration runner is wired to execute those SQL files against the configured `POSTGRES_DSN`. `DATABASE_URL` is still accepted as a backward-compatible alias, but new deployments should follow the MoP Creation Agent convention: `POSTGRES_ENABLED=true`, `POSTGRES_SCHEMA=mop_execution`, and `POSTGRES_DSN` from a Kubernetes Secret.
 
 ## Runtime Configuration
 
@@ -30,6 +35,9 @@ Important values:
 
 - `config.maxParallelJobsPerNamespace`: expected to remain `1` for namespace mutation safety.
 - `config.namespaceLockLeaseSeconds`: Redis namespace lock lease duration.
+- `config.memoryEnabled`: defaults to `true`; memory is execution context only.
+- `config.memoryPostgresEnabled`: defaults to `true`; durable memory records use PostgreSQL.
+- `config.postgresSchema`: defaults to `mop_execution`.
 - `worker.enabled`: enables the async worker once Phase 7 is implemented.
 - `reconciler.enabled`: enables recovery once reconciler logic is implemented.
 - `rbac.allowDelete`: must remain `false` unless rollback/destructive flows are approved.

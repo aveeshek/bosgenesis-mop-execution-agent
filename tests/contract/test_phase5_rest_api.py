@@ -18,7 +18,13 @@ def test_health_ready_capabilities_and_redacted_config() -> None:
     assert capabilities["ok"] is True
     assert "mop_execution_health" in capabilities["data"]["tools"]
     assert config["ok"] is True
+    assert config["data"]["memory"]["enabled"] is True
+    assert config["data"]["memory"]["postgres_enabled"] is True
+    assert config["data"]["memory"]["schema"] == "mop_execution"
+    assert config["data"]["memory"]["authority"] == "context_only_not_decision_authority"
+    assert config["data"]["postgres"]["enabled"] is True
     assert config["data"]["secrets"]["database_url"] == "[REDACTED]"
+    assert config["data"]["secrets"]["postgres_dsn"] == "[REDACTED]"
     assert "postgres://" not in str(config)
 
 
@@ -29,7 +35,7 @@ def test_artifact_bundle_job_control_and_retrieval_endpoints() -> None:
         "/v1/artifact-bundles",
         json={
             "source": {"type": "local_path", "value": "tests/fixtures/sample_mop_bundle"},
-            "target_namespace": "target-ns",
+            "target_namespace": "sample-target",
         },
     ).json()
     bundle_id = bundle["bundle_id"]
@@ -39,7 +45,7 @@ def test_artifact_bundle_job_control_and_retrieval_endpoints() -> None:
         "/v1/execution-jobs",
         json={
             "bundle_id": bundle_id,
-            "target_namespace": "target-ns",
+            "target_namespace": "sample-target",
             "job_name": "phase5-smoke",
             "plan": {"phase_ids": ["apply_configmaps"]},
         },
@@ -56,9 +62,8 @@ def test_artifact_bundle_job_control_and_retrieval_endpoints() -> None:
     assert client.get("/v1/execution-jobs").json()["data"]["jobs"][0]["job_id"] == job_id
     job_state = client.get(f"/v1/execution-jobs/{job_id}").json()["data"]["job"]["state"]
     assert job_state == "validating_bundle"
-    assert client.get(f"/v1/execution-jobs/{job_id}/plan").json()["data"]["plan"] == {
-        "phase_ids": ["apply_configmaps"]
-    }
+    plan = client.get(f"/v1/execution-jobs/{job_id}/plan").json()["data"]["plan"]
+    assert plan["phases"][0]["phase_id"] == "apply_configmaps"
     assert client.get(f"/v1/execution-jobs/{job_id}/observations").json()["ok"] is True
     assert client.get(f"/v1/execution-jobs/{job_id}/events").json()["ok"] is True
     assert client.get(f"/v1/execution-jobs/{job_id}/audit-events").json()["ok"] is True
@@ -86,6 +91,29 @@ def test_policy_evaluate_and_redaction_preview_endpoints() -> None:
     assert redaction["data"]["redacted_content"] == "[REDACTED]"
 
 
+def test_validating_bundle_job_can_be_paused_and_cancelled() -> None:
+    client = TestClient(create_app())
+
+    pause_job_id = client.post(
+        "/v1/execution-jobs",
+        json={"bundle_id": "bundle-1", "target_namespace": "target-ns"},
+    ).json()["job_id"]
+    client.post(f"/v1/execution-jobs/{pause_job_id}/start")
+    paused = client.post(f"/v1/execution-jobs/{pause_job_id}/pause")
+
+    cancel_job_id = client.post(
+        "/v1/execution-jobs",
+        json={"bundle_id": "bundle-1", "target_namespace": "target-ns"},
+    ).json()["job_id"]
+    client.post(f"/v1/execution-jobs/{cancel_job_id}/start")
+    cancelled = client.post(f"/v1/execution-jobs/{cancel_job_id}/cancel")
+
+    assert paused.status_code == 200
+    assert paused.json()["state"] == "paused"
+    assert cancelled.status_code == 200
+    assert cancelled.json()["state"] == "cancelled"
+
+
 def test_instruction_approval_reports_cancel_and_mcp_mirror() -> None:
     client = TestClient(create_app())
     job_id = client.post(
@@ -97,6 +125,14 @@ def test_instruction_approval_reports_cancel_and_mcp_mirror() -> None:
         f"/v1/execution-jobs/{job_id}/instructions",
         json={"instruction_type": "continue", "rationale": "explicit test instruction"},
     ).json()
+    rejected_instruction = client.post(
+        f"/v1/execution-jobs/{job_id}/instructions",
+        json={"instruction_type": "invent_repair"},
+    )
+    blocked_instruction = client.post(
+        f"/v1/execution-jobs/{job_id}/instructions",
+        json={"instruction_type": "patch_manifest", "manifest_patch": {"data": "unsafe"}},
+    )
     approval = client.post(
         f"/v1/execution-jobs/{job_id}/approvals",
         json={
@@ -110,6 +146,12 @@ def test_instruction_approval_reports_cancel_and_mcp_mirror() -> None:
     report_id = report["data"]["report"]["report_id"]
     report_metadata = client.get(f"/v1/execution-jobs/{job_id}/reports/{report_id}").json()
     cancelled = client.post(f"/v1/execution-jobs/{job_id}/cancel").json()
+    audit_actions = [
+        event["action"]
+        for event in client.get(f"/v1/execution-jobs/{job_id}/audit-events").json()["data"][
+            "audit_events"
+        ]
+    ]
     mcp_get = client.post(
         "/mcp",
         json={
@@ -121,6 +163,14 @@ def test_instruction_approval_reports_cancel_and_mcp_mirror() -> None:
     ).json()["result"]["structuredContent"]
 
     assert instruction["ok"] is True
+    assert rejected_instruction.status_code == 409
+    assert rejected_instruction.json()["policy_blocks"][0]["code"] == "INSTRUCTION_SCHEMA_INVALID"
+    assert blocked_instruction.status_code == 409
+    assert blocked_instruction.json()["policy_blocks"][0]["code"] == "UNSAFE_INSTRUCTION_BLOCKED"
+    assert "instruction_received" in audit_actions
+    assert "instruction_accepted" in audit_actions
+    assert "instruction_rejected" in audit_actions
+    assert "instruction_policy_blocked" in audit_actions
     assert approval["data"]["job"]["approval_status"] == "active"
     assert report["data"]["report"]["report_type"] == "release_notes"
     assert reports["data"]["reports"][0]["report_id"] == report_id

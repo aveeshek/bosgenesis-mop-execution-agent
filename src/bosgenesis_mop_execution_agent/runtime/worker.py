@@ -13,6 +13,7 @@ from bosgenesis_mop_execution_agent.models import (
     ExecutionPhase,
     ExecutionProgress,
     ExecutionStep,
+    ExternalInstruction,
     JobState,
     Observation,
     ObservationSeverity,
@@ -32,6 +33,7 @@ from bosgenesis_mop_execution_agent.persistence.repositories import JsonExecutio
 from bosgenesis_mop_execution_agent.plans.models import MachineExecutionPlan
 from bosgenesis_mop_execution_agent.runtime.decision_context import DecisionContextBuilder
 from bosgenesis_mop_execution_agent.runtime.dry_run import DryRunExecutor
+from bosgenesis_mop_execution_agent.runtime.instructions import InstructionDecision, InstructionGate
 from bosgenesis_mop_execution_agent.runtime.mutation import MutationExecutor
 from bosgenesis_mop_execution_agent.runtime.observations import ObservationBuilder
 from bosgenesis_mop_execution_agent.runtime.queue import InMemoryJobQueue
@@ -132,6 +134,13 @@ class WorkerRuntime:
         self._cancel_requested.add(job_id)
         self.enqueue(job_id)
 
+    def submit_instruction(self, instruction: ExternalInstruction) -> InstructionDecision:
+        """Accept or reject an explicit instruction from an external controller."""
+        decision = InstructionGate(self._repository).receive(instruction)
+        if decision.accepted:
+            self.enqueue(instruction.job_id)
+        return decision
+
     def run_once(self) -> RuntimeDecision:
         queued = self._queue.dequeue()
         if queued is None:
@@ -210,8 +219,19 @@ class WorkerRuntime:
             phase, step = mutation_selection
             return self._execute_mutation_step(job, phase, step)
 
+        completed_empty_phase = self._complete_next_empty_ready_phase(job, phases, steps)
+        if completed_empty_phase is not None:
+            return completed_empty_phase
+        phases = self._repository.get_phases(job.job_id)
+        steps = self._repository.get_steps(job.job_id)
         selection = self._scheduler.select_next_step(phases, steps)
         if selection is None:
+            if any(step.state in {StepState.PENDING, StepState.READY} for step in steps):
+                return self._decision_required(
+                    job,
+                    reason_code="NO_RUNNABLE_STEP",
+                    summary="Pending steps remain, but no dependency-ready step can run.",
+                )
             if (
                 dry_run
                 and job.execution_mode == ExecutionMode.EXECUTE_AFTER_APPROVAL
@@ -222,6 +242,7 @@ class WorkerRuntime:
                     JobState.AWAITING_HUMAN_APPROVAL,
                     "Dry-run completed; mutation requires approval.",
                 )
+                self._release_lock(updated.job_id)
                 self.enqueue(job.job_id)
                 return RuntimeDecision(
                     updated.job_id,
@@ -491,6 +512,42 @@ class WorkerRuntime:
         self._save_job(self._with_progress(job))
         self.enqueue(job.job_id)
         return RuntimeDecision(job.job_id, job.state, "step_completed", requeue=True)
+
+    def _complete_next_empty_ready_phase(
+        self,
+        job: ExecutionJob,
+        phases: list[ExecutionPhase],
+        steps: list[ExecutionStep],
+    ) -> RuntimeDecision | None:
+        for phase in self._scheduler.ready_phases(phases):
+            if any(step.phase_id == phase.phase_id for step in steps):
+                continue
+            self._repository.save_phase(
+                phase.model_copy(
+                    update={
+                        "status": PhaseStatus.COMPLETED,
+                        "started_at": phase.started_at or utc_now(),
+                        "completed_at": utc_now(),
+                    }
+                )
+            )
+            self._add_observation(
+                self._observations.build(
+                    job_id=job.job_id,
+                    observation_type=ObservationType.DRY_RUN_RESULT,
+                    summary=f"Empty phase {phase.phase_id} completed mechanically.",
+                    phase_id=phase.phase_id,
+                    result={
+                        "worker_reasoning_triggered": False,
+                        "phase_id": phase.phase_id,
+                        "state": PhaseStatus.COMPLETED.value,
+                    },
+                )
+            )
+            self._save_job(self._with_progress(job))
+            self.enqueue(job.job_id)
+            return RuntimeDecision(job.job_id, job.state, "empty_phase_completed", requeue=True)
+        return None
 
     def _schedule_wait(
         self,

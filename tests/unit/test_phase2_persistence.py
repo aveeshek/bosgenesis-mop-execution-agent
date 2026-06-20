@@ -15,6 +15,9 @@ from bosgenesis_mop_execution_agent.models import (
     HumanApproval,
     InstructionType,
     JobState,
+    MemoryLayer,
+    MemoryQuery,
+    MemoryRecord,
     Observation,
     ObservationSeverity,
     ObservationType,
@@ -119,6 +122,15 @@ def test_json_repository_persists_and_rehydrates_execution_records(tmp_path: Pat
     repo.save_instruction(instruction)
     repo.save_approval(approval)
     repo.save_report(report)
+    repo.save_memory_record(
+        MemoryRecord(
+            layer=MemoryLayer.DURABLE_JOB,
+            job_id=job.job_id,
+            namespace="target-ns",
+            summary="Job memory.",
+            payload_redacted={"state": "dry_run_ready"},
+        )
+    )
 
     rehydrated = JsonExecutionRepository(repo_path)
 
@@ -129,6 +141,9 @@ def test_json_repository_persists_and_rehydrates_execution_records(tmp_path: Pat
     assert rehydrated.get_instruction("instr-1") == instruction
     assert rehydrated.get_approval("appr-1") == approval
     assert rehydrated.get_reports(job.job_id) == [report]
+    memory = rehydrated.list_memory_records(MemoryQuery(job_id=job.job_id, namespace="target-ns"))
+    assert memory[0].layer == MemoryLayer.DURABLE_JOB
+    assert memory[0].authority == "context_only_not_decision_authority"
 
 
 def test_append_only_audit_writer_rejects_duplicate_event_id(tmp_path: Path) -> None:
