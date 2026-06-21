@@ -75,6 +75,60 @@ def test_worker_restart_rehydrates_runnable_jobs(tmp_path: Path) -> None:
     assert runtime.run_once().action in {"lock_unavailable", "dry_run_started"}
 
 
+def test_worker_restart_reconciliation_completes_terminal_executing_job(
+    tmp_path: Path,
+) -> None:
+    repo, runtime, _ = _runtime(tmp_path)
+    job = _job(state=JobState.EXECUTING).model_copy(
+        update={"execution_mode": ExecutionMode.EXECUTE_AFTER_APPROVAL}
+    )
+    repo.save_job(job)
+    repo.save_phase(_phase(job.job_id, status=PhaseStatus.COMPLETED))
+    repo.save_step(
+        _step(
+            job.job_id,
+            step_type=StepType.K8S_APPLY,
+            state=StepState.MUTATION_SUCCEEDED,
+        ).model_copy(update={"dry_run_status": StepState.DRY_RUN_SUCCEEDED})
+    )
+
+    assert runtime.reconcile_after_restart() == 1
+
+    stored = repo.get_job(job.job_id)
+    assert stored is not None
+    assert stored.state == JobState.COMPLETED
+    assert stored.completed_at is not None
+
+
+def test_worker_restart_reconciliation_pauses_unknown_mutation_outcome(
+    tmp_path: Path,
+) -> None:
+    repo, runtime, _ = _runtime(tmp_path)
+    job = _job(state=JobState.EXECUTING).model_copy(
+        update={"execution_mode": ExecutionMode.EXECUTE_AFTER_APPROVAL}
+    )
+    repo.save_job(job)
+    repo.save_phase(_phase(job.job_id))
+    repo.save_step(
+        _step(
+            job.job_id,
+            step_type=StepType.K8S_APPLY,
+            state=StepState.MUTATION_RUNNING,
+        ).model_copy(update={"dry_run_status": StepState.DRY_RUN_SUCCEEDED})
+    )
+
+    assert runtime.reconcile_after_restart() == 1
+
+    stored = repo.get_job(job.job_id)
+    step = repo.get_steps(job.job_id)[0]
+    latest = repo.get_observations(job.job_id)[-2]
+    assert stored is not None
+    assert stored.state == JobState.DECISION_REQUIRED
+    assert step.state == StepState.DECISION_REQUIRED
+    assert latest.result["reason_code"] == "UNKNOWN_MUTATION_OUTCOME_AFTER_RESTART"
+    assert latest.result["worker_reasoning_triggered"] is False
+
+
 def test_namespace_lock_contention_pauses_for_decision(tmp_path: Path) -> None:
     repo, runtime, redis_client = _runtime(tmp_path)
     job = _job(state=JobState.DRY_RUN_READY)

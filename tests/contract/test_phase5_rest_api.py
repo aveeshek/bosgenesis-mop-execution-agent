@@ -73,6 +73,35 @@ def test_artifact_bundle_job_control_and_retrieval_endpoints() -> None:
     assert "event: snapshot" in stream.text
 
 
+def test_start_endpoint_queues_runtime_work_without_inline_execution(monkeypatch) -> None:
+    monkeypatch.setenv("MOP_EXECUTION_API_BACKGROUND_WORKER_ENABLED", "false")
+    client = TestClient(create_app())
+
+    bundle_id = client.post(
+        "/v1/artifact-bundles",
+        json={
+            "source": {"type": "local_path", "value": "tests/fixtures/sample_mop_bundle"},
+            "target_namespace": "sample-target",
+        },
+    ).json()["bundle_id"]
+    client.post(f"/v1/artifact-bundles/{bundle_id}/validate", json={})
+    created = client.post(
+        "/v1/execution-jobs",
+        json={
+            "bundle_id": bundle_id,
+            "target_namespace": "sample-target",
+            "execution_mode": "dry_run_only",
+        },
+    ).json()
+
+    started = client.post(f"/v1/execution-jobs/{created['job_id']}/start").json()
+    stored = client.get(f"/v1/execution-jobs/{created['job_id']}").json()
+
+    assert started["message"] == "Job queued for asynchronous execution."
+    assert started["data"]["runtime_action"] == "queued"
+    assert stored["data"]["job"]["state"] == "created"
+
+
 def test_policy_evaluate_and_redaction_preview_endpoints() -> None:
     client = TestClient(create_app())
 

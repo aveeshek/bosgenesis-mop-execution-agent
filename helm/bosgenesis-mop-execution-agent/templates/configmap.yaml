@@ -24,6 +24,9 @@ data:
   WORKER_CONCURRENCY: {{ .Values.config.workerConcurrency | quote }}
   WORKER_HEARTBEAT_INTERVAL_SECONDS: {{ .Values.config.workerHeartbeatIntervalSeconds | quote }}
   RECONCILER_INTERVAL_SECONDS: {{ .Values.config.reconcilerIntervalSeconds | quote }}
+  MOP_EXECUTION_RECOVER_ON_STARTUP: {{ .Values.config.recoverOnStartup | quote }}
+  MOP_EXECUTION_API_BACKGROUND_WORKER_ENABLED: {{ .Values.config.apiBackgroundWorkerEnabled | quote }}
+  MOP_EXECUTION_API_WORKER_IDLE_SLEEP_SECONDS: {{ .Values.config.apiWorkerIdleSleepSeconds | quote }}
   OTEL_ENABLED: {{ .Values.config.enableOtel | quote }}
   SIGNOZ_ENDPOINT: {{ .Values.config.signozEndpoint | quote }}
   LANGFUSE_ENABLED: {{ .Values.config.langfuseEnabled | quote }}

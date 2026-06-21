@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -33,22 +35,16 @@ from bosgenesis_mop_execution_agent.models import (
 )
 from bosgenesis_mop_execution_agent.models.enums import ExecutionMode
 from bosgenesis_mop_execution_agent.persistence import (
-    AppendOnlyAuditWriter,
     InMemoryRedisLikeClient,
-    NamespaceLockService,
-    WorkerHeartbeatService,
 )
 from bosgenesis_mop_execution_agent.persistence.repositories import JsonExecutionRepository
 from bosgenesis_mop_execution_agent.plans.models import MachineExecutionPlan
 from bosgenesis_mop_execution_agent.policy import PolicyEvaluationContext, evaluate_policy
-from bosgenesis_mop_execution_agent.runtime.dry_run import DryRunExecutor
-from bosgenesis_mop_execution_agent.runtime.mcp_rest_adapters import (
-    HelmManagerRestDryRunClient,
-    KubernetesInspectorRestDryRunClient,
+from bosgenesis_mop_execution_agent.runtime.factory import (
+    create_worker_runtime,
+    with_bundle_root_link,
 )
-from bosgenesis_mop_execution_agent.runtime.mutation import MutationExecutor
 from bosgenesis_mop_execution_agent.runtime.queue import InMemoryJobQueue
-from bosgenesis_mop_execution_agent.runtime.worker import WorkerRuntime
 from bosgenesis_mop_execution_agent.security import redact_value
 from bosgenesis_mop_execution_agent.state.machine import (
     DEFAULT_STATE_MACHINE,
@@ -74,6 +70,20 @@ class MopExecutionApiService:
         self._reports: dict[str, list[ReportArtifact]] = {}
         self._plans: dict[str, dict[str, Any]] = {}
         self._memory = ExecutionMemoryStore()
+        self._queue = InMemoryJobQueue(self._repository)
+        self._runtime = create_worker_runtime(
+            repository=self._repository,
+            queue=self._queue,
+            redis_client=self._redis,
+            worker_id="api-background-worker",
+        )
+        self._worker_stop = threading.Event()
+        self._worker_lock = threading.Lock()
+        self._worker_thread: threading.Thread | None = None
+        if _env_bool("MOP_EXECUTION_RECOVER_ON_STARTUP", default=True):
+            recovered = self._runtime.recover_restartable_jobs()
+            if recovered:
+                self._ensure_background_worker()
 
     def health(self) -> dict[str, Any]:
         return self._ok(
@@ -263,19 +273,12 @@ class MopExecutionApiService:
             in {ExecutionMode.DRY_RUN_ONLY, ExecutionMode.EXECUTE_AFTER_APPROVAL}
             and self._repository.get_steps(job_id)
         ):
-            runtime = self._runtime_for_job(job)
-            runtime.enqueue(job_id)
-            last_action = "queued"
-            max_ticks = _env_int("MOP_EXECUTION_START_MAX_TICKS", default=100)
-            for _ in range(max_ticks):
-                decision = runtime.run_once()
-                last_action = decision.action
-                if not decision.requeue:
-                    break
+            self._runtime.enqueue(job_id)
+            self._ensure_background_worker()
             updated = self._get_job(job_id) or job
             return self._ok(
-                "Job start processed.",
-                data={"job": _dump(updated), "runtime_action": last_action},
+                "Job queued for asynchronous execution.",
+                data={"job": _dump(updated), "runtime_action": "queued"},
                 job_id=job_id,
                 state=updated.state,
             )
@@ -365,7 +368,7 @@ class MopExecutionApiService:
                 state=job.state,
             )
         if self._repository.get_steps(job_id):
-            runtime_decision = self._runtime_for_job(job).submit_instruction(instruction)
+            runtime_decision = self._runtime.submit_instruction(instruction)
             if not runtime_decision.accepted:
                 self._add_audit(
                     job_id,
@@ -398,6 +401,8 @@ class MopExecutionApiService:
             {"instruction": _dump(instruction)},
             namespace=job.target_namespace,
         )
+        if self._repository.get_steps(job_id):
+            self._ensure_background_worker()
         return self._ok(
             "Instruction submitted.",
             data={"instruction": _dump(instruction)},
@@ -755,67 +760,32 @@ class MopExecutionApiService:
             self._bundle_roots[job.bundle_id] = bundle_root
         if plan is None or bundle_root is None:
             return
-        runtime = self._runtime_for_job(job, bundle_root=bundle_root)
-        runtime.seed_plan(job.job_id, plan)
+        linked_job = with_bundle_root_link(job, bundle_root)
+        self._save_job(linked_job)
+        self._runtime.seed_plan(job.job_id, plan)
         self._job_bundle_roots[job.job_id] = bundle_root
         self._plans[job.job_id] = plan.raw_machine_execution_plan
 
-    def _runtime_for_job(
-        self,
-        job: ExecutionJob,
-        *,
-        bundle_root: Path | None = None,
-    ) -> WorkerRuntime:
-        root = bundle_root or self._job_bundle_roots.get(job.job_id) or self._bundle_roots.get(
-            job.bundle_id
-        )
-        dry_runs = None
-        mutations = None
-        if root is not None:
-            k8s_client = KubernetesInspectorRestDryRunClient(
-                base_url=os.getenv(
-                    "K8S_INSPECTOR_MCP_ENDPOINT",
-                    "http://bosgenesis-k8s-inspector-mcp:8080",
-                ),
-                api_key=os.getenv("K8S_INSPECTOR_API_KEY") or os.getenv("BOSGENESIS_API_KEY"),
-                job_id=job.job_id,
-                correlation_id=job.correlation_id,
-                trace_id=job.trace_id,
+    def _ensure_background_worker(self) -> None:
+        if not _env_bool("MOP_EXECUTION_API_BACKGROUND_WORKER_ENABLED", default=True):
+            return
+        with self._worker_lock:
+            if self._worker_thread is not None and self._worker_thread.is_alive():
+                return
+            self._worker_stop.clear()
+            self._worker_thread = threading.Thread(
+                target=self._background_worker_loop,
+                name="mop-execution-api-worker",
+                daemon=True,
             )
-            helm_client = HelmManagerRestDryRunClient(
-                base_url=os.getenv(
-                    "HELM_MANAGER_MCP_ENDPOINT",
-                    "http://bosgenesis-helm-manager-mcp:8080",
-                ),
-                api_key=os.getenv("HELM_MANAGER_API_KEY") or os.getenv("BOSGENESIS_API_KEY"),
-                job_id=job.job_id,
-                timeout_seconds=_env_float("HELM_MANAGER_REST_TIMEOUT_SECONDS", default=30.0),
-                helm_operation_timeout=os.getenv("HELM_MANAGER_OPERATION_TIMEOUT"),
-                mutation_wait=_env_bool("HELM_MANAGER_MUTATION_WAIT", default=True),
-                mutation_atomic=_env_bool("HELM_MANAGER_MUTATION_ATOMIC", default=True),
-                correlation_id=job.correlation_id,
-                trace_id=job.trace_id,
-            )
-            dry_runs = DryRunExecutor(
-                bundle_root=root,
-                k8s_client=k8s_client,
-                helm_client=helm_client,
-            )
-            mutations = MutationExecutor(
-                bundle_root=root,
-                k8s_client=k8s_client,
-                helm_client=helm_client,
-                audit_writer=AppendOnlyAuditWriter(self._repository),
-            )
-        return WorkerRuntime(
-            repository=self._repository,
-            queue=InMemoryJobQueue(self._repository),
-            lock_service=NamespaceLockService(self._redis),
-            heartbeat_service=WorkerHeartbeatService(self._redis),
-            worker_id="api-inline-worker",
-            dry_runs=dry_runs,
-            mutations=mutations,
-        )
+            self._worker_thread.start()
+
+    def _background_worker_loop(self) -> None:
+        idle_sleep = _env_float("MOP_EXECUTION_API_WORKER_IDLE_SLEEP_SECONDS", default=0.25)
+        while not self._worker_stop.is_set():
+            decision = self._runtime.run_once()
+            if decision.action == "idle":
+                time.sleep(idle_sleep)
 
     def _ok(
         self,
@@ -965,16 +935,6 @@ def _execution_mode(value: Any) -> ExecutionMode:
         return ExecutionMode(str(value))
     except ValueError:
         return ExecutionMode.EXTERNAL_LLM_CONTROLLED
-
-
-def _env_int(name: str, *, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
 
 
 def _env_float(name: str, *, default: float) -> float:

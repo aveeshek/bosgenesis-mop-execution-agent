@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,7 +68,9 @@ class WorkerRuntime:
         observations: ObservationBuilder | None = None,
         decisions: DecisionContextBuilder | None = None,
         dry_runs: DryRunExecutor | None = None,
+        dry_run_factory: Callable[[ExecutionJob], DryRunExecutor | None] | None = None,
         mutations: MutationExecutor | None = None,
+        mutation_factory: Callable[[ExecutionJob], MutationExecutor | None] | None = None,
         waits: WaitExecutor | None = None,
     ) -> None:
         self._repository = repository
@@ -79,7 +82,9 @@ class WorkerRuntime:
         self._observations = observations or ObservationBuilder()
         self._decisions = decisions or DecisionContextBuilder()
         self._dry_runs = dry_runs
+        self._dry_run_factory = dry_run_factory
         self._mutations = mutations
+        self._mutation_factory = mutation_factory
         self._waits = waits or WaitExecutor()
         self._active_locks: dict[str, NamespaceLock] = {}
         self._pause_requested: set[str] = set()
@@ -90,7 +95,50 @@ class WorkerRuntime:
 
     def recover_restartable_jobs(self) -> int:
         """Requeue persisted jobs that can safely resume after restart."""
+        self.reconcile_after_restart()
         return self._queue.rehydrate()
+
+    def reconcile_after_restart(self) -> int:
+        """Reconcile persisted in-flight state left behind by a worker restart."""
+        reconciled = 0
+        for job in sorted(self._repository.list_jobs(), key=lambda item: item.created_at):
+            if job.state in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}:
+                continue
+            steps = self._repository.get_steps(job.job_id)
+            if self._reset_retryable_running_steps(job, steps):
+                reconciled += 1
+                continue
+            running_mutations = [
+                step for step in steps if step.state == StepState.MUTATION_RUNNING
+            ]
+            if running_mutations:
+                for step in running_mutations:
+                    self._decision_required(
+                        job,
+                        reason_code="UNKNOWN_MUTATION_OUTCOME_AFTER_RESTART",
+                        summary=(
+                            "Worker restarted while a mutation was running; "
+                            "external reconciliation is required before continuing."
+                        ),
+                        step=step,
+                    )
+                    reconciled += 1
+                continue
+            refreshed = self._repository.get_job(job.job_id) or job
+            if (
+                self._job_work_is_complete(refreshed)
+                and JobState.COMPLETED
+                in DEFAULT_STATE_MACHINE.allowed_targets(refreshed.state)
+            ):
+                self._transition(
+                    refreshed,
+                    JobState.COMPLETED,
+                    "Restart reconciliation found all persisted work complete.",
+                    details={"reconciled_after_restart": True},
+                )
+                self._release_lock(refreshed.job_id)
+                reconciled += 1
+        return reconciled
 
     def seed_plan(self, job_id: str, plan: MachineExecutionPlan) -> None:
         """Persist phases and steps from a parsed machine execution plan."""
@@ -214,6 +262,20 @@ class WorkerRuntime:
         if not dry_run:
             mutation_selection = self._scheduler.select_next_mutation_step(phases, steps)
             if mutation_selection is None:
+                running_mutation = next(
+                    (step for step in steps if step.state == StepState.MUTATION_RUNNING),
+                    None,
+                )
+                if running_mutation is not None:
+                    return self._decision_required(
+                        job,
+                        reason_code="UNKNOWN_MUTATION_OUTCOME_AFTER_RESTART",
+                        summary=(
+                            "A mutation step is still marked running; "
+                            "external reconciliation is required before continuing."
+                        ),
+                        step=running_mutation,
+                    )
                 completed = self._transition(job, JobState.COMPLETED, "No mutations remain.")
                 self._release_lock(completed.job_id)
                 return RuntimeDecision(completed.job_id, completed.state, "completed")
@@ -281,7 +343,8 @@ class WorkerRuntime:
         phase: ExecutionPhase,
         step: ExecutionStep,
     ) -> RuntimeDecision:
-        if self._dry_runs is None:
+        dry_runs = self._dry_run_executor_for(job)
+        if dry_runs is None:
             return self._decision_required(
                 job,
                 reason_code="DRY_RUN_EXECUTOR_UNAVAILABLE",
@@ -300,7 +363,7 @@ class WorkerRuntime:
                 }
             )
         )
-        result = self._dry_runs.execute(job=job, step=step)
+        result = dry_runs.execute(job=job, step=step)
         if not result.success:
             failed_step = step.model_copy(
                 update={
@@ -378,7 +441,8 @@ class WorkerRuntime:
         phase: ExecutionPhase,
         step: ExecutionStep,
     ) -> RuntimeDecision:
-        if self._mutations is None:
+        mutations = self._mutation_executor_for(job)
+        if mutations is None:
             return self._decision_required(
                 job,
                 reason_code="MUTATION_EXECUTOR_UNAVAILABLE",
@@ -398,7 +462,7 @@ class WorkerRuntime:
             }
         )
         self._repository.save_step(running_step)
-        result = self._mutations.execute(
+        result = mutations.execute(
             job=job,
             step=running_step,
             approvals=self._repository.get_approvals(job.job_id),
@@ -549,6 +613,83 @@ class WorkerRuntime:
             self.enqueue(job.job_id)
             return RuntimeDecision(job.job_id, job.state, "empty_phase_completed", requeue=True)
         return None
+
+    def _dry_run_executor_for(self, job: ExecutionJob) -> DryRunExecutor | None:
+        if self._dry_run_factory is not None:
+            return self._dry_run_factory(job)
+        return self._dry_runs
+
+    def _mutation_executor_for(self, job: ExecutionJob) -> MutationExecutor | None:
+        if self._mutation_factory is not None:
+            return self._mutation_factory(job)
+        return self._mutations
+
+    def _reset_retryable_running_steps(
+        self,
+        job: ExecutionJob,
+        steps: list[ExecutionStep],
+    ) -> bool:
+        reset = False
+        for step in steps:
+            if step.state not in {StepState.DRY_RUN_RUNNING, StepState.VALIDATION_RUNNING}:
+                continue
+            self._repository.save_step(
+                step.model_copy(
+                    update={
+                        "state": StepState.PENDING,
+                        "dry_run_status": None
+                        if step.state == StepState.DRY_RUN_RUNNING
+                        else step.dry_run_status,
+                        "validation_status": None
+                        if step.state == StepState.VALIDATION_RUNNING
+                        else step.validation_status,
+                    }
+                )
+            )
+            self._add_observation(
+                self._observations.build(
+                    job_id=job.job_id,
+                    observation_type=ObservationType.STATE_TRANSITION,
+                    severity=ObservationSeverity.WARNING,
+                    summary=f"Restart reconciliation reset retryable step {step.step_id}.",
+                    phase_id=step.phase_id,
+                    step_id=step.step_id,
+                    result={
+                        "from_state": step.state.value,
+                        "to_state": StepState.PENDING.value,
+                        "worker_reasoning_triggered": False,
+                    },
+                )
+            )
+            reset = True
+        if reset:
+            self.enqueue(job.job_id)
+        return reset
+
+    def _job_work_is_complete(self, job: ExecutionJob) -> bool:
+        steps = self._repository.get_steps(job.job_id)
+        if not steps:
+            return False
+        terminal_step_states = {
+            StepState.DRY_RUN_SUCCEEDED,
+            StepState.MUTATION_SUCCEEDED,
+            StepState.VALIDATION_SUCCEEDED,
+            StepState.SKIPPED_BY_INSTRUCTION,
+            StepState.CANCELLED,
+        }
+        if any(step.state not in terminal_step_states for step in steps):
+            return False
+        if job.execution_mode == ExecutionMode.EXECUTE_AFTER_APPROVAL:
+            mutating_types = {
+                StepType.K8S_APPLY,
+                StepType.K8S_DELETE,
+                StepType.HELM_INSTALL,
+                StepType.HELM_UPGRADE,
+            }
+            for step in steps:
+                if step.type in mutating_types and step.state != StepState.MUTATION_SUCCEEDED:
+                    return False
+        return True
 
     def _schedule_wait(
         self,
