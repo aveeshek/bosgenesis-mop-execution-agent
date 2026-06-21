@@ -43,6 +43,10 @@ class HelmMutationClient(Protocol):
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
+        timeout: str | None = None,
     ) -> McpCallResult:
         """Install or upgrade a Helm release."""
 
@@ -225,7 +229,7 @@ class MutationExecutor:
                 error_code=ErrorCode.MCP_UNAVAILABLE,
                 message="helm_mutation_client_missing",
             )
-        release_name, chart = _parse_helm_command(_mutation_command(step) or "")
+        release_name, chart = _helm_release_and_chart(step)
         if not release_name or not chart:
             return MutationActionResult(
                 success=False,
@@ -242,6 +246,12 @@ class MutationExecutor:
                 chart=chart,
                 namespace=job.target_namespace,
                 values=values_result,
+                version=_metadata_str(step, "chart_version"),
+                repo_name=_metadata_str(step, "repo_name"),
+                repo_url=_metadata_str(step, "repo_url"),
+                timeout=_metadata_str(step, "install_timeout")
+                or _metadata_str(step, "helm_timeout")
+                or _metadata_str(step, "timeout"),
             )
         except Exception as exc:
             return MutationActionResult(
@@ -478,6 +488,19 @@ def _parse_helm_command(command: str) -> tuple[str | None, str | None]:
     if len(positional) < 2:
         return None, None
     return positional[0], positional[1]
+
+
+def _helm_release_and_chart(step: ExecutionStep) -> tuple[str | None, str | None]:
+    release_name = _metadata_str(step, "release_name")
+    chart = _metadata_str(step, "chart_ref")
+    if release_name and chart:
+        return release_name, chart
+    return _parse_helm_command(_mutation_command(step) or "")
+
+
+def _metadata_str(step: ExecutionStep, key: str) -> str | None:
+    value = step.metadata.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _block(code: str, message: str, guardrail: str) -> PolicyBlock:

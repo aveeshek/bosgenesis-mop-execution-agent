@@ -789,6 +789,10 @@ class MopExecutionApiService:
                 ),
                 api_key=os.getenv("HELM_MANAGER_API_KEY") or os.getenv("BOSGENESIS_API_KEY"),
                 job_id=job.job_id,
+                timeout_seconds=_env_float("HELM_MANAGER_REST_TIMEOUT_SECONDS", default=30.0),
+                helm_operation_timeout=os.getenv("HELM_MANAGER_OPERATION_TIMEOUT"),
+                mutation_wait=_env_bool("HELM_MANAGER_MUTATION_WAIT", default=True),
+                mutation_atomic=_env_bool("HELM_MANAGER_MUTATION_ATOMIC", default=True),
                 correlation_id=job.correlation_id,
                 trace_id=job.trace_id,
             )
@@ -969,6 +973,16 @@ def _env_int(name: str, *, default: int) -> int:
         return default
     try:
         return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, *, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default
 

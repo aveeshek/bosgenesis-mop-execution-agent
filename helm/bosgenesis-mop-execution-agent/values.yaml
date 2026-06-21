@@ -49,6 +49,10 @@ config:
   langfuseEnabled: "false"
   k8sInspectorMcpEndpoint: "http://bosgenesis-k8s-inspector-mcp.bosgenesis.svc.cluster.local:8080"
   helmManagerMcpEndpoint: "http://bosgenesis-helm-manager-mcp.bosgenesis.svc.cluster.local:8080"
+  helmManagerRestTimeoutSeconds: "960"
+  helmManagerOperationTimeout: "15m"
+  helmManagerMutationWait: "false"
+  helmManagerMutationAtomic: "false"
   dataIngestionMcpEndpoint: "http://bosgenesis-k8s-data-ingestion-agent.bosgenesis.svc.cluster.local:8080"
   mopCreationAgentEndpoint: "http://bosgenesis-mop-creation-agent.bosgenesis.svc.cluster.local:8080"
   releaseNoteAgentEndpoint: "http://bosgenesis-release-note-agent-api.bosgenesis.svc.cluster.local:8080"
@@ -138,7 +142,10 @@ persistence:
   storageClassName: ""
 
 artifactBundles:
-  existingClaim: ""
+  # Shared read-only artifact bridge written by mop-creation-agent and read by
+  # mop-execution-agent. This claim is intentionally distinct from each
+  # service's private data PVC.
+  existingClaim: bosgenesis-mop-agent-artifacts
   mountPath: /data/mops
   readOnly: true
 

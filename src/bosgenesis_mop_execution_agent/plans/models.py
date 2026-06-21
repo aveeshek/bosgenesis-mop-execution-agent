@@ -50,6 +50,7 @@ class MachinePlanStep(StrictBaseModel):
     manifest_refs: list[str] = Field(default_factory=list)
     values_refs: list[str] = Field(default_factory=list)
     commands: list[MachinePlanCommand] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     expected_outcomes: list[str] = Field(default_factory=list)
     required_human_inputs: list[str] = Field(default_factory=list)
     inference: dict[str, Any] | None = None

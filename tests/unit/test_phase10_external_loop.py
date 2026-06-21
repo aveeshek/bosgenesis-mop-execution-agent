@@ -311,6 +311,9 @@ class FailureHelmClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
         if self.injected_error == ErrorCode.HELM_RENDER_FAILED:
             return _mcp_result(
@@ -333,6 +336,9 @@ class FailureHelmClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
         return _mcp_result(
             server_name="helm",

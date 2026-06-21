@@ -11,6 +11,22 @@ from pydantic import ValidationError
 from bosgenesis_mop_execution_agent.plans.dependency_graph import validate_dependency_graph
 from bosgenesis_mop_execution_agent.plans.models import MachineExecutionPlan
 
+STEP_METADATA_KEYS = {
+    "release_name",
+    "chart_ref",
+    "chart_version",
+    "chart_source",
+    "repo_name",
+    "repo_url",
+    "credential_secret_ref",
+    "generated_by",
+    "timeout",
+    "helm_timeout",
+    "install_timeout",
+    "wait",
+    "atomic",
+}
+
 
 class MachinePlanParseError(ValueError):
     """Raised when a machine execution plan cannot be parsed or validated."""
@@ -183,6 +199,7 @@ def _normalize_steps(value: Any) -> list[dict[str, Any]]:
                 "manifest_refs": manifest_refs,
                 "values_refs": values_refs,
                 "commands": commands,
+                "metadata": _normalize_step_metadata(item),
                 "expected_outcomes": _string_list(item.get("expected_outcomes")),
                 "required_human_inputs": _string_list(item.get("required_human_inputs")),
                 "inference": inference if isinstance(inference, dict) else None,
@@ -214,6 +231,18 @@ def _normalize_commands(value: Any) -> list[dict[str, Any]]:
     return commands
 
 
+def _normalize_step_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    raw_metadata = item.get("metadata")
+    if isinstance(raw_metadata, dict):
+        metadata.update(raw_metadata)
+    for key in STEP_METADATA_KEYS:
+        value = item.get(key)
+        if value is not None:
+            metadata[key] = value
+    return metadata
+
+
 def _normalize_step_type(
     raw_type: str,
     manifest_refs: list[str],
@@ -239,6 +268,10 @@ def _normalize_step_type(
         return "k8s_apply"
     if "kubectl get" in command_text:
         return "k8s_get"
+    if raw_type == "helm" and "helm upgrade" in command_text:
+        return "helm_upgrade"
+    if raw_type == "helm" and "helm install" in command_text:
+        return "helm_install"
     if "helm template" in command_text or "helm list" in command_text:
         return "helm_validate"
     if raw_type in {"validation", "validate"}:
@@ -251,7 +284,10 @@ def _normalize_step_type(
 def _manifest_refs_from_commands(commands: list[dict[str, Any]]) -> list[str]:
     refs: list[str] = []
     for command in commands:
-        parts = str(command.get("command") or "").split()
+        command_text = str(command.get("command") or "")
+        if "kubectl apply" not in command_text:
+            continue
+        parts = command_text.split()
         for index, part in enumerate(parts):
             if part in {"-f", "--filename"} and index + 1 < len(parts):
                 candidate = parts[index + 1].strip("'\"")

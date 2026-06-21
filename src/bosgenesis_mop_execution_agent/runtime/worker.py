@@ -121,6 +121,7 @@ class WorkerRuntime:
                         commands=[
                             command.model_dump(mode="json") for command in plan_step.commands
                         ],
+                        metadata=plan_step.metadata,
                     )
                 )
         job = self._require_job(job_id)

@@ -77,6 +77,10 @@ def test_approved_helm_install_upgrade_mutation_uses_helm_executor(tmp_path: Pat
                 "global": {"namespace": "signoz"},
                 "image": {"tag": "render-failure-fixture"},
             },
+            "version": None,
+            "repo_name": None,
+            "repo_url": None,
+            "timeout": None,
         }
     ]
 
@@ -366,6 +370,10 @@ class FakeHelmMutationClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
+        timeout: str | None = None,
     ) -> McpCallResult:
         self.calls.append(
             {
@@ -373,6 +381,10 @@ class FakeHelmMutationClient:
                 "chart": chart,
                 "namespace": namespace,
                 "values": values or {},
+                "version": version,
+                "repo_name": repo_name,
+                "repo_url": repo_url,
+                "timeout": timeout,
             }
         )
         return _mcp_result(

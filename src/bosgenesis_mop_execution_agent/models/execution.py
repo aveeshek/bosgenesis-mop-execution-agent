@@ -88,6 +88,7 @@ class ExecutionStep(StrictBaseModel):
     manifest_refs: list[str] = []
     values_refs: list[str] = []
     commands: list[dict[str, Any]] = []
+    metadata: dict[str, Any] = {}
     command_fingerprint: str | None = None
     dry_run_status: StepState | None = None
     mutation_status: StepState | None = None

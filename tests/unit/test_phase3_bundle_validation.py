@@ -124,6 +124,45 @@ def test_embedded_installation_notes_plan_is_fallback(tmp_path: Path) -> None:
     assert bundle.machine_plan.target_namespace == "sample-target"
 
 
+def test_machine_plan_preserves_helm_metadata_fields(tmp_path: Path) -> None:
+    bundle_root = _copy_sample_bundle(tmp_path)
+    plan = _read_yaml(bundle_root / "machine_execution_plan.yaml")
+    step = plan["phases"][0]["steps"][0]
+    step.update(
+        {
+            "type": "helm_upgrade",
+            "manifest_refs": [],
+            "values_refs": ["values/values-signoz.yaml"],
+            "release_name": "signoz",
+            "chart_ref": "signoz/signoz",
+            "chart_version": "0.129.0",
+            "repo_name": "signoz",
+            "repo_url": "https://charts.signoz.io",
+            "commands": [
+                {
+                    "kind": "upgrade",
+                    "command": "helm upgrade --install signoz signoz/signoz -n sample-target",
+                }
+            ],
+        }
+    )
+    values_dir = bundle_root / "values"
+    values_dir.mkdir(exist_ok=True)
+    (values_dir / "values-signoz.yaml").write_text("global: {}\n", encoding="utf-8")
+    _write_yaml(bundle_root / "machine_execution_plan.yaml", plan)
+
+    bundle = load_and_validate_bundle(
+        BundleSource(type=BundleSourceType.LOCAL_PATH, value=str(bundle_root)),
+        target_namespace="sample-target",
+    )
+
+    metadata = bundle.machine_plan.phases[0].steps[0].metadata
+    assert metadata["release_name"] == "signoz"
+    assert metadata["chart_ref"] == "signoz/signoz"
+    assert metadata["chart_version"] == "0.129.0"
+    assert metadata["repo_url"] == "https://charts.signoz.io"
+
+
 def test_unsupported_schema_fails_closed(tmp_path: Path) -> None:
     bundle_root = _copy_sample_bundle(tmp_path)
     plan = _read_yaml(bundle_root / "machine_execution_plan.yaml")
@@ -266,6 +305,53 @@ def test_values_file_sensitive_key_fails_closed(tmp_path: Path) -> None:
             BundleSource(type=BundleSourceType.LOCAL_PATH, value=str(bundle_root)),
             target_namespace="sample-target",
         )
+
+
+def test_helm_values_flag_is_not_loaded_as_kubernetes_manifest(tmp_path: Path) -> None:
+    bundle_root = _copy_sample_bundle(tmp_path)
+    (bundle_root / "generated/values.yaml").write_text(
+        "_note: placeholder values are supporting Helm input\n",
+        encoding="utf-8",
+    )
+    plan = _read_yaml(bundle_root / "machine_execution_plan.yaml")
+    plan["dependency_graph"].append({"phase_id": "install_helm", "depends_on": []})
+    plan["phases"].append(
+        {
+            "phase_id": "install_helm",
+            "objective": "Dry-run a Helm release with a values file.",
+            "depends_on": [],
+            "steps": [
+                {
+                    "step_id": "helm-dry-run",
+                    "title": "Dry-run Helm release",
+                    "type": "helm",
+                    "commands": [
+                        {
+                            "kind": "dry_run",
+                            "command": (
+                                "helm upgrade --install sample sample/chart "
+                                "-n sample-target -f generated/values.yaml --dry-run"
+                            ),
+                            "dry_run": True,
+                            "mutating": False,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    _write_yaml(bundle_root / "machine_execution_plan.yaml", plan)
+
+    bundle = load_and_validate_bundle(
+        BundleSource(type=BundleSourceType.LOCAL_PATH, value=str(bundle_root)),
+        target_namespace="sample-target",
+    )
+
+    assert {manifest.path for manifest in bundle.manifests} == {
+        "generated/configmap-sample-app.yaml"
+    }
+    assert [values.path for values in bundle.values_files] == ["generated/values.yaml"]
+    assert bundle.machine_plan.phases[1].steps[0].type == "helm_upgrade"
 
 
 def test_artifact_index_missing_file_fails_closed(tmp_path: Path) -> None:

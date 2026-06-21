@@ -11,11 +11,13 @@ from bosgenesis_mop_execution_agent.models import (
     ErrorCode,
     ExecutionJob,
     ExecutionMode,
+    ExecutionStep,
     JobState,
     Observation,
     ObservationSeverity,
     ObservationType,
     StepState,
+    StepType,
 )
 from bosgenesis_mop_execution_agent.persistence import (
     InMemoryRedisLikeClient,
@@ -107,6 +109,42 @@ def test_helm_render_failure_fixture_pauses_before_dry_run_install(tmp_path: Pat
     assert latest.result["outputs"][0]["tool"] == "chart.template"
 
 
+def test_helm_step_metadata_is_forwarded_to_helm_client(tmp_path: Path) -> None:
+    values_dir = tmp_path / "values"
+    values_dir.mkdir()
+    (values_dir / "values-signoz.yaml").write_text("global: {}\n", encoding="utf-8")
+    helm_client = FakeHelmClient()
+    executor = DryRunExecutor(bundle_root=tmp_path, helm_client=helm_client)
+    step = ExecutionStep(
+        step_id="helm-1-signoz",
+        job_id="job-1",
+        phase_id="install_helm_releases",
+        sequence_index=0,
+        type=StepType.HELM_UPGRADE,
+        values_refs=["values/values-signoz.yaml"],
+        metadata={
+            "release_name": "signoz",
+            "chart_ref": "signoz/signoz",
+            "chart_version": "0.129.0",
+            "repo_name": "signoz",
+            "repo_url": "https://charts.signoz.io",
+        },
+    )
+
+    result = executor.execute(job=_job(target_namespace="agent-testing"), step=step)
+
+    assert result.success is True
+    assert helm_client.template_kwargs[-1] == {
+        "release_name": "signoz",
+        "chart": "signoz/signoz",
+        "namespace": "agent-testing",
+        "version": "0.129.0",
+        "repo_name": "signoz",
+        "repo_url": "https://charts.signoz.io",
+    }
+    assert helm_client.dry_run_kwargs[-1]["repo_url"] == "https://charts.signoz.io"
+
+
 def _runtime(
     tmp_path: Path,
     *,
@@ -172,6 +210,8 @@ class FakeHelmClient:
     def __init__(self, *, template_success: bool = True) -> None:
         self.template_success = template_success
         self.calls: list[str] = []
+        self.template_kwargs: list[dict[str, Any]] = []
+        self.dry_run_kwargs: list[dict[str, Any]] = []
 
     def template(
         self,
@@ -180,8 +220,21 @@ class FakeHelmClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
         self.calls.append("template")
+        self.template_kwargs.append(
+            {
+                "release_name": release_name,
+                "chart": chart,
+                "namespace": namespace,
+                "version": version,
+                "repo_name": repo_name,
+                "repo_url": repo_url,
+            }
+        )
         if not self.template_success:
             return _mcp_result(
                 server_name="helm",
@@ -203,8 +256,21 @@ class FakeHelmClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
         self.calls.append("dry_run_install_upgrade")
+        self.dry_run_kwargs.append(
+            {
+                "release_name": release_name,
+                "chart": chart,
+                "namespace": namespace,
+                "version": version,
+                "repo_name": repo_name,
+                "repo_url": repo_url,
+            }
+        )
         return _mcp_result(
             server_name="helm",
             tool_name="release.dry_run_install_upgrade",

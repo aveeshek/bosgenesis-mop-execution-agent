@@ -29,6 +29,10 @@ data:
   LANGFUSE_ENABLED: {{ .Values.config.langfuseEnabled | quote }}
   K8S_INSPECTOR_MCP_ENDPOINT: {{ .Values.config.k8sInspectorMcpEndpoint | quote }}
   HELM_MANAGER_MCP_ENDPOINT: {{ .Values.config.helmManagerMcpEndpoint | quote }}
+  HELM_MANAGER_REST_TIMEOUT_SECONDS: {{ .Values.config.helmManagerRestTimeoutSeconds | quote }}
+  HELM_MANAGER_OPERATION_TIMEOUT: {{ .Values.config.helmManagerOperationTimeout | quote }}
+  HELM_MANAGER_MUTATION_WAIT: {{ .Values.config.helmManagerMutationWait | quote }}
+  HELM_MANAGER_MUTATION_ATOMIC: {{ .Values.config.helmManagerMutationAtomic | quote }}
   K8S_DATA_INGESTION_MCP_ENDPOINT: {{ .Values.config.dataIngestionMcpEndpoint | quote }}
   MOP_CREATION_AGENT_ENDPOINT: {{ .Values.config.mopCreationAgentEndpoint | quote }}
   RELEASE_NOTE_AGENT_ENDPOINT: {{ .Values.config.releaseNoteAgentEndpoint | quote }}

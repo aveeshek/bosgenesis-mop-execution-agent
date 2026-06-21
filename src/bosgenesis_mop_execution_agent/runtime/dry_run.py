@@ -30,6 +30,9 @@ class HelmDryRunClient(Protocol):
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
         """Render Helm manifests without mutation."""
 
@@ -40,6 +43,9 @@ class HelmDryRunClient(Protocol):
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
         """Run Helm install/upgrade dry-run without mutation."""
 
@@ -169,12 +175,16 @@ class DryRunExecutor:
         if isinstance(values_result, DryRunActionResult):
             return values_result
         values = values_result
+        metadata = _helm_metadata(step)
 
         template_result = self._helm_client.template(
             release_name=release_name,
             chart=chart,
             namespace=job.target_namespace,
             values=values,
+            version=metadata.get("chart_version"),
+            repo_name=metadata.get("repo_name"),
+            repo_url=metadata.get("repo_url"),
         )
         outputs = [self._mcp_output(template_result, artifact_ref=",".join(step.values_refs))]
         if not template_result.success:
@@ -196,6 +206,9 @@ class DryRunExecutor:
             chart=chart,
             namespace=job.target_namespace,
             values=values,
+            version=metadata.get("chart_version"),
+            repo_name=metadata.get("repo_name"),
+            repo_url=metadata.get("repo_url"),
         )
         outputs.append(self._mcp_output(dry_run_result, artifact_ref=",".join(step.values_refs)))
         if not dry_run_result.success:
@@ -250,6 +263,11 @@ class DryRunExecutor:
         return merged
 
     def _helm_release_and_chart(self, step: ExecutionStep) -> tuple[str | None, str | None]:
+        metadata = _helm_metadata(step)
+        release_name = metadata.get("release_name")
+        chart = metadata.get("chart_ref")
+        if release_name and chart:
+            return release_name, chart
         for command in step.commands:
             raw = str(command.get("command", ""))
             release_name, chart = _parse_helm_command(raw)
@@ -298,3 +316,12 @@ def _parse_helm_command(command: str) -> tuple[str | None, str | None]:
     if len(positional) < 2:
         return None, None
     return positional[0], positional[1]
+
+
+def _helm_metadata(step: ExecutionStep) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for key in ("release_name", "chart_ref", "chart_version", "repo_name", "repo_url"):
+        value = step.metadata.get(key)
+        if isinstance(value, str) and value:
+            metadata[key] = value
+    return metadata

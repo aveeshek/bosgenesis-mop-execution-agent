@@ -180,6 +180,9 @@ class HelmManagerRestDryRunClient:
         api_key: str | None,
         job_id: str,
         timeout_seconds: float = 30.0,
+        helm_operation_timeout: str | None = None,
+        mutation_wait: bool = True,
+        mutation_atomic: bool = True,
         correlation_id: str | None = None,
         trace_id: str | None = None,
     ) -> None:
@@ -187,6 +190,9 @@ class HelmManagerRestDryRunClient:
         self._api_key = api_key
         self._job_id = job_id
         self._timeout_seconds = timeout_seconds
+        self._helm_operation_timeout = helm_operation_timeout
+        self._mutation_wait = mutation_wait
+        self._mutation_atomic = mutation_atomic
         self._correlation_id = correlation_id
         self._trace_id = trace_id
 
@@ -197,11 +203,18 @@ class HelmManagerRestDryRunClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
+        repo_result = self._ensure_repo(repo_name=repo_name, repo_url=repo_url)
+        if repo_result is not None and not repo_result.success:
+            return repo_result
         payload = {
             "release_name": release_name,
             "chart_ref": chart,
             "namespace": namespace,
+            "version": version,
             "values": values or {},
             "actor": "bosgenesis-mop-execution-agent",
             "correlation_id": self._correlation_id,
@@ -215,14 +228,24 @@ class HelmManagerRestDryRunClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
     ) -> McpCallResult:
+        repo_result = self._ensure_repo(repo_name=repo_name, repo_url=repo_url)
+        if repo_result is not None and not repo_result.success:
+            return repo_result
         payload = {
             "release_name": release_name,
             "chart_ref": chart,
             "namespace": namespace,
+            "version": version,
             "values": values or {},
             "dry_run": True,
             "install": True,
+            "wait": self._mutation_wait,
+            "atomic": self._mutation_atomic,
+            "timeout": self._helm_operation_timeout,
             "actor": "bosgenesis-mop-execution-agent",
             "correlation_id": self._correlation_id,
         }
@@ -235,18 +258,46 @@ class HelmManagerRestDryRunClient:
         chart: str,
         namespace: str,
         values: dict[str, Any] | None = None,
+        version: str | None = None,
+        repo_name: str | None = None,
+        repo_url: str | None = None,
+        timeout: str | None = None,
     ) -> McpCallResult:
+        repo_result = self._ensure_repo(repo_name=repo_name, repo_url=repo_url)
+        if repo_result is not None and not repo_result.success:
+            return repo_result
         payload = {
             "release_name": release_name,
             "chart_ref": chart,
             "namespace": namespace,
+            "version": version,
             "values": values or {},
             "dry_run": False,
             "install": True,
+            "wait": self._mutation_wait,
+            "atomic": self._mutation_atomic,
+            "timeout": timeout or self._helm_operation_timeout,
             "actor": "bosgenesis-mop-execution-agent",
             "correlation_id": self._correlation_id,
         }
         return self._post("/releases/upgrade", payload, "helm.install_upgrade")
+
+    def _ensure_repo(
+        self,
+        *,
+        repo_name: str | None,
+        repo_url: str | None,
+    ) -> McpCallResult | None:
+        if not repo_name or not repo_url:
+            return None
+        payload = {
+            "name": repo_name,
+            "url": repo_url,
+            "force_update": True,
+            "actor": "bosgenesis-mop-execution-agent",
+            "correlation_id": self._correlation_id,
+        }
+        return self._post("/repos/add", payload, "helm.repo_add")
 
     def _post(self, path: str, payload: dict[str, Any], tool_name: str) -> McpCallResult:
         headers = {"X-API-Key": self._api_key} if self._api_key else {}
