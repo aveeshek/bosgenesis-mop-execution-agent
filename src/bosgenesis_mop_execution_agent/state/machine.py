@@ -120,7 +120,7 @@ ALLOWED_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
     JobState.ROLLING_BACK: frozenset(
         {JobState.COMPLETED, JobState.FAILED, JobState.DECISION_REQUIRED, JobState.CANCELLED}
     ),
-    JobState.COMPLETED: frozenset(),
+    JobState.COMPLETED: frozenset({JobState.ROLLBACK_REQUESTED}),
     JobState.FAILED: frozenset(),
     JobState.CANCELLED: frozenset(),
 }

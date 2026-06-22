@@ -21,5 +21,8 @@ class ReportArtifact(StrictBaseModel):
     correlation_id: str | None = None
     trace_id: str | None = None
     download_url: str | None = None
+    html_path: str | None = None
+    pdf_path: str | None = None
+    archive_path: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     redacted: bool = True

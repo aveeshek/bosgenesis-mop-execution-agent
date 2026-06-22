@@ -131,6 +131,44 @@ def test_mutation_cannot_occur_without_continue_instruction(tmp_path: Path) -> N
     )
 
 
+def test_continue_after_mutation_gate_preserves_dry_run_and_resumes_execution(
+    tmp_path: Path,
+) -> None:
+    bundle_root = Path("tests/fixtures/sample_mop_bundle")
+    k8s_client = FakeK8sMutationClient()
+    repo, runtime = _runtime(tmp_path, bundle_root=bundle_root, k8s_client=k8s_client)
+    job = _seed_sample_job(repo, runtime, target_namespace="sample-target")
+    step = repo.get_steps(job.job_id)[0]
+    repo.save_approval(
+        _approval(job, step_id=step.step_id, command=_mutating_command(step.commands))
+    )
+    runtime.enqueue(job.job_id)
+
+    assert runtime.run_once().action == "decision_required"
+
+    result = runtime.submit_instruction(
+        ExternalInstruction(
+            instruction_id="instruction-after-mutation-gate",
+            job_id=job.job_id,
+            instruction_type=InstructionType.CONTINUE,
+            controller_id="codex",
+            issued_by="external_llm_codex",
+            issued_at=NOW,
+            target_step_id=step.step_id,
+        )
+    )
+
+    stored = repo.get_job(job.job_id)
+    resumed_step = repo.get_steps(job.job_id)[0]
+    assert result.accepted
+    assert stored is not None
+    assert stored.state == JobState.EXECUTING
+    assert resumed_step.state == StepState.DRY_RUN_SUCCEEDED
+    assert resumed_step.dry_run_status == StepState.DRY_RUN_SUCCEEDED
+    assert runtime.run_once().action == "mutation_step_completed"
+    assert len(k8s_client.calls) == 1
+
+
 def test_unknown_mutation_outcome_pauses_with_critical_observation(tmp_path: Path) -> None:
     bundle_root = Path("tests/fixtures/sample_mop_bundle")
     k8s_client = FakeK8sMutationClient(raise_on_apply=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from bosgenesis_mop_execution_agent.api.dependencies import get_api_service, require_api_actor
 from bosgenesis_mop_execution_agent.api.service import MopExecutionApiService
@@ -109,6 +109,29 @@ async def request_rollback(
     return _response(service.request_rollback(job_id, payload or {}))
 
 
+@router.post("/execution-jobs/{job_id}/rollback/execute")
+async def execute_rollback(
+    job_id: str,
+    payload: dict[str, Any],
+    service: ApiServiceDep,
+) -> JSONResponse:
+    return _response(service.execute_rollback(job_id, payload))
+
+
+@router.post("/execution-jobs/{job_id}/validate")
+async def run_validation(job_id: str, service: ApiServiceDep) -> JSONResponse:
+    return _response(service.run_validation(job_id))
+
+
+@router.post("/namespaces/{namespace}/revert")
+async def revert_namespace(
+    namespace: str,
+    payload: dict[str, Any],
+    service: ApiServiceDep,
+) -> JSONResponse:
+    return _response(service.revert_namespace({"target_namespace": namespace, **payload}))
+
+
 @router.post("/execution-jobs/{job_id}/instructions")
 async def submit_instruction(
     job_id: str,
@@ -208,12 +231,62 @@ async def get_report_metadata(
     return _response(service.get_report_metadata(job_id, report_id))
 
 
+@router.get("/execution-jobs/{job_id}/reports/{report_id}/download", response_model=None)
+async def download_report_artifact(
+    job_id: str,
+    report_id: str,
+    service: ApiServiceDep,
+    artifact: str = Query(default="pdf"),
+) -> Response:
+    envelope = service.resolve_report_download(job_id, report_id, artifact)
+    if envelope.get("ok") is not True:
+        return _response(envelope)
+    download = envelope["data"]["download"]
+    return FileResponse(
+        download["path"],
+        media_type=download["media_type"],
+        filename=download["filename"],
+    )
+
+
 @router.post("/execution-jobs/{job_id}/reports/release-notes")
 async def generate_release_notes(
     job_id: str,
     service: ApiServiceDep,
 ) -> JSONResponse:
     return _response(service.generate_release_notes(job_id))
+
+
+@router.post("/execution-jobs/{job_id}/reports/execution-summary")
+async def generate_execution_report(
+    job_id: str,
+    service: ApiServiceDep,
+) -> JSONResponse:
+    return _response(service.generate_execution_report(job_id))
+
+
+@router.post("/execution-jobs/{job_id}/reports/validation")
+async def generate_validation_report(
+    job_id: str,
+    service: ApiServiceDep,
+) -> JSONResponse:
+    return _response(service.generate_validation_report(job_id))
+
+
+@router.post("/execution-jobs/{job_id}/reports/rollback")
+async def generate_rollback_report(
+    job_id: str,
+    service: ApiServiceDep,
+) -> JSONResponse:
+    return _response(service.generate_rollback_report(job_id))
+
+
+@router.post("/execution-jobs/{job_id}/reports/change-summary")
+async def generate_change_report(
+    job_id: str,
+    service: ApiServiceDep,
+) -> JSONResponse:
+    return _response(service.generate_change_report(job_id))
 
 
 @router.post("/policy/evaluate")

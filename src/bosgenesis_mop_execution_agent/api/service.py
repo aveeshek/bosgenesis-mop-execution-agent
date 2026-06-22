@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import time
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,6 +15,7 @@ from bosgenesis_mop_execution_agent.artifacts.bundle_validator import load_and_v
 from bosgenesis_mop_execution_agent.artifacts.models import BundleSource
 from bosgenesis_mop_execution_agent.common.ids import new_id
 from bosgenesis_mop_execution_agent.common.time import utc_now
+from bosgenesis_mop_execution_agent.mcp_clients.release_notes import ReleaseNoteMcpClient
 from bosgenesis_mop_execution_agent.memory import ExecutionMemoryStore
 from bosgenesis_mop_execution_agent.models import (
     MEMORY_AUTHORITY,
@@ -40,9 +42,15 @@ from bosgenesis_mop_execution_agent.persistence import (
 from bosgenesis_mop_execution_agent.persistence.repositories import JsonExecutionRepository
 from bosgenesis_mop_execution_agent.plans.models import MachineExecutionPlan
 from bosgenesis_mop_execution_agent.policy import PolicyEvaluationContext, evaluate_policy
+from bosgenesis_mop_execution_agent.reports import ReportGenerator
 from bosgenesis_mop_execution_agent.runtime.factory import (
+    create_rollback_executor,
+    create_validation_executor,
     create_worker_runtime,
     with_bundle_root_link,
+)
+from bosgenesis_mop_execution_agent.runtime.mcp_rest_adapters import (
+    HttpMcpCompatibilityTransport,
 )
 from bosgenesis_mop_execution_agent.runtime.queue import InMemoryJobQueue
 from bosgenesis_mop_execution_agent.security import redact_value
@@ -310,6 +318,247 @@ class MopExecutionApiService:
             payload or {},
         )
 
+    def run_validation(self, job_id: str) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        steps = self._repository.get_steps(job_id)
+        result = create_validation_executor(job).execute(job=job, steps=steps)
+        payload = _dataclass_payload(result)
+        self._record_observation(
+            Observation(
+                observation_id=new_id("obs"),
+                job_id=job_id,
+                severity=ObservationSeverity.INFO if result.success else ObservationSeverity.ERROR,
+                observation_type=ObservationType.VALIDATION_RESULT,
+                summary="Post-execution validation completed.",
+                correlation_id=job.correlation_id,
+                trace_id=job.trace_id,
+                result=payload,
+                redaction_applied=True,
+            )
+        )
+        self._add_audit(
+            job_id,
+            "validation_completed",
+            {"success": str(result.success), "check_count": str(len(result.checks))},
+        )
+        report = self._record_report(
+            job,
+            ReportType.VALIDATION_REPORT,
+            "BOS Genesis Validation Report",
+            sections={"validation_result": payload},
+            warnings=result.warnings,
+        )
+        return self._ok(
+            "Validation completed.",
+            data={"validation": payload, "report": self._report_payload(report)},
+            job_id=job_id,
+            state=job.state,
+        )
+
+    def execute_rollback(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        if payload.get("confirm") is not True:
+            return self._error(
+                "Rollback execution requires confirm=true.",
+                code="ROLLBACK_CONFIRMATION_REQUIRED",
+                job_id=job_id,
+                state=job.state,
+            )
+        if job.state not in {JobState.ROLLBACK_REQUESTED, JobState.ROLLING_BACK}:
+            return self._error(
+                "Rollback execution requires a rollback-requested job.",
+                code="ROLLBACK_REQUEST_REQUIRED",
+                job_id=job_id,
+                state=job.state,
+            )
+        if job.state == JobState.ROLLBACK_REQUESTED:
+            transitioned = self._transition(
+                job_id,
+                JobState.ROLLING_BACK,
+                "Rollback execution started.",
+                {"mode": str(payload.get("mode") or "namespace_revert")},
+            )
+            if not transitioned["ok"]:
+                return transitioned
+            job = self._get_job(job_id) or job
+
+        result = create_rollback_executor(job).execute(
+            job=job,
+            approvals=self._repository.get_approvals(job_id),
+            instructions=self._repository.get_instructions(job_id),
+            mode=str(payload.get("mode") or "namespace_revert"),
+            dry_run=bool(payload.get("dry_run", False)),
+            release_name=payload.get("release_name"),
+            revision=payload.get("revision"),
+            force_purge_release_storage=bool(
+                payload.get("force_purge_release_storage", True)
+            ),
+        )
+        payload_data = _dataclass_payload(result)
+        self._record_observation(
+            Observation(
+                observation_id=new_id("obs"),
+                job_id=job_id,
+                severity=ObservationSeverity.INFO if result.success else ObservationSeverity.ERROR,
+                observation_type=ObservationType.MUTATION_RESULT,
+                summary="Rollback execution completed.",
+                correlation_id=job.correlation_id,
+                trace_id=job.trace_id,
+                result=payload_data,
+                redaction_applied=True,
+            )
+        )
+        self._add_audit(
+            job_id,
+            "rollback_executed",
+            {"success": str(result.success), "step_count": str(len(result.steps))},
+        )
+        report = self._record_report(
+            job,
+            ReportType.ROLLBACK_REPORT,
+            "BOS Genesis Rollback Report",
+            sections={"rollback_result": payload_data},
+            warnings=result.warnings,
+        )
+        latest = self._get_job(job_id) or job
+        if result.success and JobState.COMPLETED in DEFAULT_STATE_MACHINE.allowed_targets(
+            latest.state
+        ):
+            self._transition(job_id, JobState.COMPLETED, "Rollback completed.", payload_data)
+        elif (
+            not result.success
+            and JobState.DECISION_REQUIRED
+            in DEFAULT_STATE_MACHINE.allowed_targets(latest.state)
+        ):
+            failed_transition = self._transition(
+                job_id,
+                JobState.DECISION_REQUIRED,
+                "Rollback requires external decision.",
+                {"warnings": result.warnings},
+            )
+            failed_state = (
+                self._get_job(job_id) or latest
+            ).state
+            return self._error(
+                "Rollback execution failed and requires external decision.",
+                code="ROLLBACK_FAILED",
+                data={
+                    "rollback": payload_data,
+                    "report": self._report_payload(report),
+                    "transition": failed_transition.get("data", {}),
+                },
+                job_id=job_id,
+                state=failed_state,
+            )
+        return self._ok(
+            "Rollback execution completed.",
+            data={"rollback": payload_data, "report": self._report_payload(report)},
+            job_id=job_id,
+            state=(self._get_job(job_id) or latest).state,
+        )
+
+    def revert_namespace(self, payload: dict[str, Any]) -> dict[str, Any]:
+        namespace = str(payload.get("target_namespace") or payload.get("namespace") or "")
+        if not namespace:
+            return self._error(
+                "Namespace revert requires target_namespace.",
+                code="TARGET_NAMESPACE_REQUIRED",
+            )
+        if payload.get("confirm") is not True:
+            return self._error(
+                "Namespace revert requires confirm=true.",
+                code="NAMESPACE_REVERT_CONFIRMATION_REQUIRED",
+            )
+        job_id = str(payload.get("job_id") or new_id("job"))
+        job = self._get_job(job_id)
+        if job is None:
+            job = ExecutionJob(
+                job_id=job_id,
+                bundle_id="namespace-revert",
+                target_namespace=namespace,
+                job_name="agent-ai-namespace-revert",
+                correlation_id=payload.get("correlation_id"),
+                trace_id=payload.get("trace_id"),
+                state=JobState.ROLLING_BACK,
+                execution_mode=ExecutionMode.EXTERNAL_LLM_CONTROLLED,
+            )
+            self._save_job(job)
+            self._add_audit(
+                job_id,
+                "namespace_revert_job_created",
+                {"target_namespace": namespace},
+            )
+        result = create_rollback_executor(job).revert_namespace(
+            job=job,
+            mode=str(payload.get("mode") or "namespace_revert"),
+            dry_run=bool(payload.get("dry_run", False)),
+            release_name=payload.get("release_name"),
+            revision=payload.get("revision"),
+            force_purge_release_storage=bool(
+                payload.get("force_purge_release_storage", True)
+            ),
+        )
+        result_payload = _dataclass_payload(result)
+        self._record_observation(
+            Observation(
+                observation_id=new_id("obs"),
+                job_id=job.job_id,
+                severity=ObservationSeverity.INFO if result.success else ObservationSeverity.ERROR,
+                observation_type=ObservationType.MUTATION_RESULT,
+                summary=f"Namespace revert completed for {namespace}.",
+                correlation_id=job.correlation_id,
+                trace_id=job.trace_id,
+                result=result_payload,
+                redaction_applied=True,
+            )
+        )
+        self._add_audit(
+            job.job_id,
+            "namespace_reverted",
+            {"target_namespace": namespace, "success": str(result.success)},
+        )
+        report = self._record_report(
+            job,
+            ReportType.ROLLBACK_REPORT,
+            "BOS Genesis Namespace Revert Report",
+            sections={"namespace_revert_result": result_payload},
+            warnings=result.warnings,
+        )
+        latest = self._get_job(job.job_id) or job
+        if result.success and latest.state == JobState.ROLLING_BACK:
+            self._transition(job.job_id, JobState.COMPLETED, "Namespace revert completed.")
+        elif not result.success and latest.state == JobState.ROLLING_BACK:
+            failed_transition = self._transition(
+                job.job_id,
+                JobState.DECISION_REQUIRED,
+                "Namespace revert requires external decision.",
+                {"warnings": result.warnings},
+            )
+            failed_state = (
+                self._get_job(job.job_id) or latest
+            ).state
+            return self._error(
+                "Namespace revert failed and requires external decision.",
+                code="NAMESPACE_REVERT_FAILED",
+                data={
+                    "rollback": result_payload,
+                    "report": self._report_payload(report),
+                    "transition": failed_transition.get("data", {}),
+                },
+                job_id=job.job_id,
+                state=failed_state,
+            )
+        return self._ok(
+            "Namespace revert completed.",
+            data={"rollback": result_payload, "report": self._report_payload(report)},
+            job_id=job.job_id,
+            state=(self._get_job(job.job_id) or latest).state,
+        )
+
     def submit_instruction(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         job = self._get_job(job_id)
         if job is None:
@@ -349,7 +598,6 @@ class MopExecutionApiService:
             InstructionType.PATCH_MANIFEST,
             InstructionType.REPLACE_MANIFEST,
             InstructionType.INVOKE_MCP_TOOL,
-            InstructionType.ROLLBACK,
         }
         if instruction.instruction_type in unsafe_types:
             self._add_audit(
@@ -364,6 +612,24 @@ class MopExecutionApiService:
                 "Instruction "
                 f"{instruction.instruction_type.value} requires a dedicated policy path.",
                 code="UNSAFE_INSTRUCTION_BLOCKED",
+                job_id=job_id,
+                state=job.state,
+            )
+        if (
+            instruction.instruction_type == InstructionType.ROLLBACK
+            and job.state != JobState.ROLLBACK_REQUESTED
+        ):
+            self._add_audit(
+                job_id,
+                "instruction_policy_blocked",
+                {
+                    "instruction_id": instruction.instruction_id,
+                    "reason_code": "ROLLBACK_STATE_REQUIRED",
+                },
+            )
+            return self._error(
+                "Rollback instructions require a rollback-requested job.",
+                code="ROLLBACK_STATE_REQUIRED",
                 job_id=job_id,
                 state=job.state,
             )
@@ -546,37 +812,226 @@ class MopExecutionApiService:
     def list_reports(self, job_id: str) -> dict[str, Any]:
         if self._get_job(job_id) is None:
             return self._not_found("Job not found.", job_id=job_id)
+        reports_by_id = {
+            report.report_id: report
+            for report in self._repository.get_reports(job_id)
+        }
+        reports_by_id.update(
+            {report.report_id: report for report in self._reports.get(job_id, [])}
+        )
         return self._ok(
             "Reports returned.",
-            data={"reports": [_dump(item) for item in self._reports.get(job_id, [])]},
+            data={
+                "reports": [
+                    self._report_payload(item)
+                    for item in sorted(
+                        reports_by_id.values(),
+                        key=lambda report: report.created_at,
+                    )
+                ]
+            },
             job_id=job_id,
         )
 
     def get_report_metadata(self, job_id: str, report_id: str) -> dict[str, Any]:
         if self._get_job(job_id) is None:
             return self._not_found("Job not found.", job_id=job_id)
-        for report in self._reports.get(job_id, []):
-            if report.report_id == report_id:
-                return self._ok(
-                    "Report metadata returned.",
-                    data={"report": _dump(report), "download_ready": False},
-                    job_id=job_id,
-                )
-        return self._not_found("Report not found.", job_id=job_id)
+        report = self._find_report(job_id, report_id)
+        if report is None:
+            return self._not_found("Report not found.", job_id=job_id)
+        download_ready = self.resolve_report_download(job_id, report_id, "pdf")["ok"] is True
+        return self._ok(
+            "Report metadata returned.",
+            data={"report": self._report_payload(report), "download_ready": download_ready},
+            job_id=job_id,
+        )
 
-    def generate_release_notes(self, job_id: str) -> dict[str, Any]:
+    def report_download_metadata(
+        self,
+        job_id: str,
+        report_id: str,
+        artifact: str = "pdf",
+    ) -> dict[str, Any]:
+        resolved = self.resolve_report_download(job_id, report_id, artifact)
+        if not resolved["ok"]:
+            return resolved
+        download = dict(resolved["data"]["download"])
+        download.pop("path", None)
+        return self._ok(
+            "Report download metadata returned.",
+            data={"download": download},
+            job_id=job_id,
+            redact_data=False,
+        )
+
+    def resolve_report_download(
+        self,
+        job_id: str,
+        report_id: str,
+        artifact: str = "pdf",
+    ) -> dict[str, Any]:
         if self._get_job(job_id) is None:
             return self._not_found("Job not found.", job_id=job_id)
-        report = ReportArtifact(
-            report_id=new_id("report"),
-            report_type=ReportType.RELEASE_NOTES,
-            path=f"reports/{job_id}/release-notes.md",
-            job_id=job_id,
-            download_url=f"/v1/execution-jobs/{job_id}/reports/release-notes",
+        report = self._find_report(job_id, report_id)
+        if report is None:
+            return self._not_found("Report not found.", job_id=job_id)
+        artifact_key = (artifact or "pdf").strip().lower()
+        artifact_fields = {
+            "markdown": ("path", "text/markdown; charset=utf-8"),
+            "md": ("path", "text/markdown; charset=utf-8"),
+            "html": ("html_path", "text/html; charset=utf-8"),
+            "pdf": ("pdf_path", "application/pdf"),
+            "archive": ("archive_path", "application/zip"),
+            "zip": ("archive_path", "application/zip"),
+        }
+        field_and_media = artifact_fields.get(artifact_key)
+        if field_and_media is None:
+            return self._error(
+                "Unsupported report artifact requested.",
+                code="REPORT_ARTIFACT_UNSUPPORTED",
+                data={"artifact": artifact, "supported_artifacts": sorted(artifact_fields)},
+                job_id=job_id,
+            )
+        field_name, media_type = field_and_media
+        raw_path = getattr(report, field_name)
+        if not raw_path:
+            return self._error(
+                "Report artifact is not available for this report.",
+                code="REPORT_ARTIFACT_UNAVAILABLE",
+                data={"artifact": artifact_key, "field": field_name},
+                job_id=job_id,
+            )
+        artifact_path = Path(raw_path)
+        if not artifact_path.is_absolute():
+            artifact_path = _artifact_root_path(self._repository.path) / artifact_path
+        artifact_path = artifact_path.resolve()
+        artifact_root = _artifact_root_path(self._repository.path).resolve()
+        try:
+            artifact_path.relative_to(artifact_root)
+        except ValueError:
+            return self._error(
+                "Report artifact path is outside the configured artifact root.",
+                code="REPORT_ARTIFACT_PATH_OUTSIDE_ROOT",
+                job_id=job_id,
+            )
+        if not artifact_path.exists() or not artifact_path.is_file():
+            return self._not_found("Report artifact file not found.", job_id=job_id)
+        normalized_artifact = (
+            "archive"
+            if artifact_key == "zip"
+            else "markdown"
+            if artifact_key == "md"
+            else artifact_key
         )
-        self._reports.setdefault(job_id, []).append(report)
+        return self._ok(
+            "Report artifact resolved.",
+            data={
+                "download": {
+                    "job_id": job_id,
+                    "report_id": report_id,
+                    "report_type": report.report_type.value,
+                    "artifact": normalized_artifact,
+                    "filename": artifact_path.name,
+                    "media_type": media_type,
+                    "size_bytes": artifact_path.stat().st_size,
+                    "download_url": _report_download_url(job_id, report_id, normalized_artifact),
+                    "path": str(artifact_path),
+                }
+            },
+            job_id=job_id,
+            redact_data=False,
+        )
+
+    def generate_execution_report(self, job_id: str) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        report = self._record_report(
+            job,
+            ReportType.EXECUTION_SUMMARY,
+            "BOS Genesis Execution Report",
+            sections=self._change_sections(job),
+        )
+        return self._ok(
+            "Execution report generated.",
+            data={"report": self._report_payload(report)},
+            job_id=job_id,
+        )
+
+    def generate_validation_report(self, job_id: str) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        report = self._record_report(
+            job,
+            ReportType.VALIDATION_REPORT,
+            "BOS Genesis Validation Report",
+            sections=self._change_sections(job),
+        )
+        return self._ok(
+            "Validation report generated.",
+            data={"report": self._report_payload(report)},
+            job_id=job_id,
+        )
+
+    def generate_rollback_report(self, job_id: str) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        report = self._record_report(
+            job,
+            ReportType.ROLLBACK_REPORT,
+            "BOS Genesis Rollback Report",
+            sections=self._change_sections(job),
+        )
+        return self._ok(
+            "Rollback report generated.",
+            data={"report": self._report_payload(report)},
+            job_id=job_id,
+        )
+
+    def generate_change_report(self, job_id: str) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        report = self._record_report(
+            job,
+            ReportType.CHANGE_REPORT,
+            "BOS Genesis Target Namespace Change Report",
+            sections={
+                **self._change_sections(job),
+                "document_purpose": (
+                    "Operator-facing record of the resources and actions performed in "
+                    f"target namespace {job.target_namespace}."
+                ),
+            },
+        )
+        return self._ok(
+            "Change report generated.",
+            data={"report": self._report_payload(report)},
+            job_id=job_id,
+        )
+
+    def generate_release_notes(self, job_id: str) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        release_note_result = self._call_release_note_agent(job)
+        report = self._record_report(
+            job,
+            ReportType.RELEASE_NOTES,
+            "BOS Genesis Release Notes",
+            sections={
+                **self._change_sections(job),
+                "release_note_mcp_integration": release_note_result,
+            },
+        )
         self._add_audit(job_id, "release_notes_requested", {"report_id": report.report_id})
-        return self._ok("Release notes requested.", data={"report": _dump(report)}, job_id=job_id)
+        return self._ok(
+            "Release notes generated.",
+            data={"report": self._report_payload(report), "release_note_mcp": release_note_result},
+            job_id=job_id,
+        )
 
     def evaluate_policy(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -639,7 +1094,17 @@ class MopExecutionApiService:
                 job_id=job_id,
                 state=job.state,
             )
-        updated = job.model_copy(update={"state": target_state, "updated_at": utc_now()})
+        updated = job.model_copy(
+            update={
+                "state": target_state,
+                "updated_at": utc_now(),
+                "decision_required": target_state == JobState.DECISION_REQUIRED,
+                "blocked": target_state == JobState.DECISION_REQUIRED,
+                "completed_at": utc_now()
+                if target_state in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}
+                else job.completed_at,
+            }
+        )
         self._save_job(updated)
         self._observations.setdefault(job_id, []).append(result.observation)
         self._audit_events.setdefault(job_id, []).append(result.audit_event)
@@ -675,16 +1140,157 @@ class MopExecutionApiService:
             summary=summary,
             result=cast("dict[str, Any]", redact_value(result)),
         )
-        self._observations.setdefault(job_id, []).append(observation)
+        self._record_observation(observation)
+
+    def _record_observation(self, observation: Observation) -> None:
+        self._observations.setdefault(observation.job_id, []).append(observation)
         self._repository.add_observation(observation)
-        job = self._get_job(job_id)
+        job = self._get_job(observation.job_id)
         self._write_memory(
             MemoryLayer.OBSERVABILITY,
-            job_id,
-            summary,
+            observation.job_id,
+            observation.summary,
             observation.model_dump(mode="json"),
             namespace=job.target_namespace if job else None,
         )
+
+    def _record_report(
+        self,
+        job: ExecutionJob,
+        report_type: ReportType,
+        title: str,
+        *,
+        sections: dict[str, Any] | None = None,
+        warnings: list[str] | None = None,
+    ) -> ReportArtifact:
+        generator = ReportGenerator(_artifact_root_path(self._repository.path))
+        report_set = generator.generate(
+            job=job,
+            report_type=report_type,
+            title=title,
+            steps=self._repository.get_steps(job.job_id),
+            observations=self._repository.get_observations(job.job_id),
+            audit_events=self._repository.list_audit_events(job.job_id),
+            sections=sections or {},
+            warnings=warnings or [],
+        )
+        report = generator.artifact(job=job, report_type=report_type, report_set=report_set)
+        reports = [
+            item
+            for item in self._reports.get(job.job_id, [])
+            if item.report_id != report.report_id
+        ]
+        reports.append(report)
+        self._reports[job.job_id] = reports
+        self._repository.save_report(report)
+        self._add_audit(
+            job.job_id,
+            "report_generated",
+            {"report_id": report.report_id, "report_type": report.report_type.value},
+        )
+        return report
+
+    def _find_report(self, job_id: str, report_id: str) -> ReportArtifact | None:
+        reports_by_id = {
+            report.report_id: report
+            for report in self._repository.get_reports(job_id)
+        }
+        reports_by_id.update(
+            {report.report_id: report for report in self._reports.get(job_id, [])}
+        )
+        return reports_by_id.get(report_id)
+
+    def _report_payload(self, report: ReportArtifact) -> dict[str, Any]:
+        payload = _dump(report)
+        if report.job_id:
+            payload["download_url"] = _report_download_url(
+                report.job_id,
+                report.report_id,
+                "pdf",
+            )
+        return payload
+
+    def _change_sections(self, job: ExecutionJob) -> dict[str, Any]:
+        steps = self._repository.get_steps(job.job_id)
+        observations = self._repository.get_observations(job.job_id)
+        mutation_observations = [
+            observation.model_dump(mode="json")
+            for observation in observations
+            if observation.observation_type == ObservationType.MUTATION_RESULT
+        ]
+        validation_observations = [
+            observation.model_dump(mode="json")
+            for observation in observations
+            if observation.observation_type == ObservationType.VALIDATION_RESULT
+        ]
+        return {
+            "target_namespace": job.target_namespace,
+            "source_namespace": job.source_namespace,
+            "resource_change_table": [
+                {
+                    "step_id": step.step_id,
+                    "phase_id": step.phase_id,
+                    "type": step.type.value,
+                    "state": step.state.value,
+                    "manifest_refs": step.manifest_refs,
+                    "values_refs": step.values_refs,
+                }
+                for step in steps
+            ],
+            "mutation_observations": mutation_observations,
+            "validation_observations": validation_observations,
+        }
+
+    def _call_release_note_agent(self, job: ExecutionJob) -> dict[str, Any]:
+        endpoint = os.getenv("RELEASE_NOTE_MCP_ENDPOINT")
+        if not endpoint:
+            return {
+                "adapter": "bosgenesis_release_note_agent",
+                "configured": False,
+                "status": "not_configured_local_artifacts_generated",
+                "formats": ["markdown", "html", "pdf", "zip"],
+            }
+        client = ReleaseNoteMcpClient(
+            server_name="bosgenesis_release_note_agent",
+            transport=HttpMcpCompatibilityTransport(
+                base_url=endpoint,
+                api_key=os.getenv("RELEASE_NOTE_API_KEY") or os.getenv("BOSGENESIS_API_KEY"),
+            ),
+            job_id=job.job_id,
+            timeout_seconds=_env_float("RELEASE_NOTE_MCP_TIMEOUT_SECONDS", default=30.0),
+            correlation_id=job.correlation_id,
+            trace_id=job.trace_id,
+        )
+        result = client.create_execution_notes(
+            job_id=job.job_id,
+            executed_steps=[
+                step.model_dump(mode="json")
+                for step in self._repository.get_steps(job.job_id)
+            ],
+            warnings=[
+                observation.summary
+                for observation in self._repository.get_observations(job.job_id)
+                if observation.severity
+                in {ObservationSeverity.WARNING, ObservationSeverity.ERROR}
+            ],
+            trace_id=job.trace_id,
+        )
+        self._record_observation(result.observation)
+        if result.audit_event is not None:
+            self._repository.append_audit_event(result.audit_event)
+        if result.success:
+            return {
+                "adapter": "bosgenesis_release_note_agent",
+                "configured": True,
+                "status": "generated_by_release_note_mcp",
+                "data": result.data or {},
+            }
+        return {
+            "adapter": "bosgenesis_release_note_agent",
+            "configured": True,
+            "status": "release_note_mcp_failed_local_artifacts_generated",
+            "error": result.error.model_dump(mode="json") if result.error else {},
+        }
 
     def _add_audit(self, job_id: str, action: str, details: dict[str, Any]) -> None:
         event = AuditEvent(
@@ -886,7 +1492,15 @@ def capabilities_payload() -> dict[str, Any]:
             "mop_execution_get_memory_context",
             "mop_execution_evaluate_policy",
             "mop_execution_request_rollback",
+            "mop_execution_execute_rollback",
+            "mop_execution_revert_namespace",
+            "mop_execution_run_validation",
+            "mop_execution_generate_execution_report",
+            "mop_execution_generate_validation_report",
+            "mop_execution_generate_rollback_report",
+            "mop_execution_generate_change_report",
             "mop_execution_generate_release_notes",
+            "mop_execution_download_report",
         ],
         "mcp_adapters": [
             "bosgenesis_k8s",
@@ -905,6 +1519,17 @@ def _dump(model: Any) -> dict[str, Any]:
     return {"value": model}
 
 
+def _dataclass_payload(value: Any) -> dict[str, Any]:
+    if is_dataclass(value):
+        payload = asdict(value)
+    elif isinstance(value, dict):
+        payload = value
+    else:
+        payload = {"value": value}
+    redacted = redact_value(payload)
+    return redacted if isinstance(redacted, dict) else {"value": redacted}
+
+
 def _memory_filters(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "namespace",
@@ -918,6 +1543,10 @@ def _memory_filters(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if key in allowed and value}
 
 
+def _report_download_url(job_id: str, report_id: str, artifact: str = "pdf") -> str:
+    return f"/v1/execution-jobs/{job_id}/reports/{report_id}/download?artifact={artifact}"
+
+
 def _repository_path() -> Path:
     configured = os.getenv("MOP_EXECUTION_REPOSITORY_PATH")
     if configured:
@@ -926,6 +1555,13 @@ def _repository_path() -> Path:
     if artifact_root:
         return Path(artifact_root) / "repository.json"
     return Path(tempfile.mkdtemp(prefix="bosgenesis-mop-execution-agent-")) / "repository.json"
+
+
+def _artifact_root_path(repository_path: Path) -> Path:
+    configured = os.getenv("MOP_EXECUTION_REPORT_ROOT") or os.getenv("ARTIFACT_ROOT_PATH")
+    if configured:
+        return Path(configured)
+    return repository_path.parent
 
 
 def _execution_mode(value: Any) -> ExecutionMode:

@@ -50,7 +50,9 @@ def test_validating_bundle_allows_operator_pause_and_cancel() -> None:
 def test_terminal_states_have_no_outbound_transitions() -> None:
     machine = StateMachine()
 
-    assert machine.allowed_targets(JobState.COMPLETED) == frozenset()
+    assert machine.allowed_targets(JobState.COMPLETED) == frozenset(
+        {JobState.ROLLBACK_REQUESTED}
+    )
     assert machine.allowed_targets(JobState.FAILED) == frozenset()
     assert machine.allowed_targets(JobState.CANCELLED) == frozenset()
 

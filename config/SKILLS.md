@@ -1,6 +1,6 @@
 ---
 name: bosgenesis-mop-execution-agent
-description: Use when Codex needs to control or inspect BOS Genesis MoP execution jobs through the `bosgenesis_mop_execution` MCP server, including registering bundles, validating machine execution plans, creating/starting/pausing/resuming/cancelling jobs, submitting external instructions or approvals, reading observations/audit events/memory context, evaluating policy, requesting rollback, and generating release notes.
+description: Use when Codex needs to control, validate, rollback, report on, or inspect BOS Genesis MoP execution jobs through the `bosgenesis_mop_execution` MCP server, including bundle registration, job lifecycle, external instructions, approvals, observations, audit, memory context, policy evaluation, namespace revert, validation reports, rollback reports, change reports, release notes, and report download metadata.
 ---
 
 # BOS Genesis MoP Execution Agent
@@ -30,8 +30,11 @@ url = "http://mop-execution-agent.bosgenesis.local/mcp"
 6. When a job pauses in `decision_required`, call `mop_execution_get_next_required_decision`, inspect observations/audit events, then submit a bounded instruction with `mop_execution_submit_instruction`.
 7. Submit human approval references with `mop_execution_submit_approval` only when the approval scope, job ID, target namespace, phase, step, and command fingerprint match.
 8. Use `mop_execution_list_observations` and `mop_execution_list_audit_events` for factual status. Do not invent missing state.
-9. Request rollback with `mop_execution_request_rollback` only with explicit instruction and approval context.
-10. Generate final notes with `mop_execution_generate_release_notes` after the execution has reached a terminal or reportable state.
+9. Run post-execution validation with `mop_execution_run_validation` after dry-run or mutation completes.
+10. Request rollback with `mop_execution_request_rollback` only with explicit instruction and approval context.
+11. Execute rollback or namespace revert only through `mop_execution_execute_rollback` or `mop_execution_revert_namespace` after the user explicitly approves cleanup.
+12. Generate final execution, validation, rollback, change, and release-note reports after the execution has reached a reportable state.
+13. Use `mop_execution_download_report` for download metadata and then fetch the REST `download_url`; do not ask MCP to stream PDF bytes.
 
 ## Tool Routing
 
@@ -47,7 +50,7 @@ Read-only or discovery tools:
 - `mop_execution_list_audit_events`
 - `mop_execution_get_memory_context`
 - `mop_execution_evaluate_policy`
-- `mop_execution_generate_release_notes`
+- `mop_execution_download_report`
 
 Bundle and job lifecycle tools:
 
@@ -58,18 +61,44 @@ Bundle and job lifecycle tools:
 - `mop_execution_pause_job`
 - `mop_execution_resume_job`
 - `mop_execution_cancel_job`
+- `mop_execution_run_validation`
 
 Controller and approval tools:
 
 - `mop_execution_submit_instruction`
 - `mop_execution_submit_approval`
 - `mop_execution_request_rollback`
+- `mop_execution_execute_rollback`
+- `mop_execution_revert_namespace`
+
+Report tools:
+
+- `mop_execution_generate_execution_report`
+- `mop_execution_generate_validation_report`
+- `mop_execution_generate_rollback_report`
+- `mop_execution_generate_change_report`
+- `mop_execution_generate_release_notes`
+- `mop_execution_download_report`
+
+Report download workflow:
+
+1. Generate or list the report and capture `report_id`.
+2. Call `mop_execution_download_report` with `job_id`, `report_id`, and `artifact` (`markdown`, `html`, `pdf`, or `archive`).
+3. Use the returned REST URL:
+
+```text
+/v1/execution-jobs/{job_id}/reports/{report_id}/download?artifact=pdf
+```
+
+4. Download binary files through REST only. MCP returns metadata/link envelopes, not PDF bytes.
+5. If a PDF is generated after the ReportLab PDF fix, prefer newly generated files over older downloaded files.
 
 ## Guardrails
 
 - Do not continue after `policy_blocks` unless the block has an explicit allowed resolution path.
 - Do not submit mutating instructions without dry-run evidence and human approval.
 - Do not submit approvals that are expired, unscoped, namespace-mismatched, or missing command fingerprints.
+- Do not execute rollback or namespace revert without explicit user confirmation.
 - Do not copy, request, store, or reveal Kubernetes Secret values.
 - Do not request production data or PVC content copy.
 - Keep all summaries redacted. If a tool response includes `redaction_applied = false`, treat it as unsafe and stop.

@@ -29,7 +29,15 @@ enabled_tools = [
   "mop_execution_get_memory_context",
   "mop_execution_evaluate_policy",
   "mop_execution_request_rollback",
+  "mop_execution_execute_rollback",
+  "mop_execution_revert_namespace",
+  "mop_execution_run_validation",
+  "mop_execution_generate_execution_report",
+  "mop_execution_generate_validation_report",
+  "mop_execution_generate_rollback_report",
+  "mop_execution_generate_change_report",
   "mop_execution_generate_release_notes",
+  "mop_execution_download_report",
 ]
 
 [mcp_servers.bosgenesis_mop_execution.tools.mop_execution_register_bundle]
@@ -63,6 +71,27 @@ approval_mode = "prompt"
 approval_mode = "prompt"
 
 [mcp_servers.bosgenesis_mop_execution.tools.mop_execution_request_rollback]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_execute_rollback]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_revert_namespace]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_run_validation]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_generate_execution_report]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_generate_validation_report]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_generate_rollback_report]
+approval_mode = "prompt"
+
+[mcp_servers.bosgenesis_mop_execution.tools.mop_execution_generate_change_report]
 approval_mode = "prompt"
 
 [mcp_servers.bosgenesis_mop_execution.tools.mop_execution_generate_release_notes]

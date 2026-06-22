@@ -174,6 +174,20 @@ def test_instruction_approval_reports_cancel_and_mcp_mirror() -> None:
     reports = client.get(f"/v1/execution-jobs/{job_id}/reports").json()
     report_id = report["data"]["report"]["report_id"]
     report_metadata = client.get(f"/v1/execution-jobs/{job_id}/reports/{report_id}").json()
+    download_url = f"/v1/execution-jobs/{job_id}/reports/{report_id}/download?artifact=pdf"
+    downloaded = client.get(download_url)
+    mcp_download = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "mop_execution_download_report",
+                "arguments": {"job_id": job_id, "report_id": report_id, "artifact": "pdf"},
+            },
+        },
+    ).json()["result"]["structuredContent"]
     cancelled = client.post(f"/v1/execution-jobs/{job_id}/cancel").json()
     audit_actions = [
         event["action"]
@@ -202,8 +216,18 @@ def test_instruction_approval_reports_cancel_and_mcp_mirror() -> None:
     assert "instruction_policy_blocked" in audit_actions
     assert approval["data"]["job"]["approval_status"] == "active"
     assert report["data"]["report"]["report_type"] == "release_notes"
+    assert report["data"]["report"]["download_url"] == download_url
     assert reports["data"]["reports"][0]["report_id"] == report_id
+    assert reports["data"]["reports"][0]["download_url"] == download_url
     assert report_metadata["data"]["report"]["report_id"] == report_id
+    assert report_metadata["data"]["report"]["download_url"] == download_url
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"] == "application/pdf"
+    assert downloaded.content.startswith(b"%PDF")
+    assert mcp_download["ok"] is True
+    assert mcp_download["data"]["download"]["download_url"] == download_url
+    assert mcp_download["data"]["download"]["filename"].endswith(".pdf")
+    assert "path" not in mcp_download["data"]["download"]
     assert cancelled["state"] == "cancelled"
     assert mcp_get["data"]["job"]["state"] == "cancelled"
 

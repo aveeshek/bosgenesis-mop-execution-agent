@@ -17,6 +17,61 @@ from bosgenesis_mop_execution_agent.models import (
 from bosgenesis_mop_execution_agent.security import redact_value
 
 
+class HttpMcpCompatibilityTransport:
+    """Small transport for MCP servers exposing /mcp/tools/{tool_name} compatibility APIs."""
+
+    def __init__(self, *, base_url: str, api_key: str | None = None) -> None:
+        self._base_url = _rest_base_url(base_url)
+        self._api_key = api_key
+
+    def call_tool(
+        self,
+        *,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        timeout_seconds: float,
+        correlation_id: str | None,
+        trace_id: str | None,
+    ) -> dict[str, Any]:
+        headers = {"X-API-Key": self._api_key} if self._api_key else {}
+        payload = {
+            **arguments,
+            "correlation_id": correlation_id,
+            "trace_id": trace_id,
+        }
+        try:
+            with httpx.Client(timeout=timeout_seconds) as client:
+                response = client.post(
+                    f"{self._base_url}/mcp/tools/{tool_name}",
+                    json=payload,
+                    headers=headers,
+                )
+        except httpx.TimeoutException:
+            return _compat_error(ErrorCode.TIMEOUT_EXCEEDED, f"mcp_timeout:{tool_name}")
+        except httpx.HTTPError as exc:
+            return _compat_error(
+                ErrorCode.MCP_UNAVAILABLE,
+                f"mcp_unavailable:{server_name}:{type(exc).__name__}",
+            )
+        data = _response_data(response)
+        if not response.is_success:
+            return _compat_error(
+                _error_code_from_response(response, data),
+                _message_from_response(response, data),
+            )
+        if data.get("ok") is True:
+            nested = data.get("data", {})
+            return {"ok": True, "data": nested if isinstance(nested, dict) else {"value": nested}}
+        if data.get("ok") is False:
+            error = data.get("error")
+            return {
+                "ok": False,
+                "error": error if isinstance(error, dict) else {"message": str(error)},
+            }
+        return {"ok": True, "data": data}
+
+
 class KubernetesInspectorRestDryRunClient:
     """Dry-run client backed by the K8s Inspector REST API."""
 
@@ -65,6 +120,104 @@ class KubernetesInspectorRestDryRunClient:
             payload,
             server_name="bosgenesis_k8s",
             tool_name="manifest.apply",
+        )
+
+    def namespace_summary(self, namespace: str) -> McpCallResult:
+        return self._get(
+            "/namespace/summary",
+            {"namespace": namespace, "actor": "bosgenesis-mop-execution-agent"},
+            server_name="bosgenesis_k8s",
+            tool_name="namespace.summary",
+        )
+
+    def list_pods(self, namespace: str) -> McpCallResult:
+        return self._get_collection("/pods", namespace, "pod.list")
+
+    def list_services(self, namespace: str) -> McpCallResult:
+        return self._get_collection("/services", namespace, "service.list")
+
+    def list_pvcs(self, namespace: str) -> McpCallResult:
+        return self._get_collection("/pvcs", namespace, "pvc.list")
+
+    def list_deployments(self, namespace: str) -> McpCallResult:
+        return self._get_collection("/deployments", namespace, "deployment.list")
+
+    def list_statefulsets(self, namespace: str) -> McpCallResult:
+        return self._get_collection("/statefulsets", namespace, "statefulset.list")
+
+    def list_ingresses(self, namespace: str) -> McpCallResult:
+        return self._get_collection("/ingresses", namespace, "ingress.list")
+
+    def delete_collection(
+        self,
+        *,
+        resource: str,
+        namespace: str,
+        dry_run: bool = False,
+        label_selector: str | None = None,
+        field_selector: str | None = None,
+    ) -> McpCallResult:
+        payload = {
+            "resource": resource,
+            "namespace": namespace,
+            "dry_run": dry_run,
+            "label_selector": label_selector,
+            "field_selector": field_selector,
+            "actor": "bosgenesis-mop-execution-agent",
+            "correlation_id": self._correlation_id,
+        }
+        return self._post(
+            "/deletecollection",
+            payload,
+            server_name="bosgenesis_k8s",
+            tool_name=f"{resource}.delete_collection",
+        )
+
+    def _get_collection(self, path: str, namespace: str, tool_name: str) -> McpCallResult:
+        return self._get(
+            path,
+            {"namespace": namespace, "actor": "bosgenesis-mop-execution-agent"},
+            server_name="bosgenesis_k8s",
+            tool_name=tool_name,
+        )
+
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any],
+        *,
+        server_name: str,
+        tool_name: str,
+    ) -> McpCallResult:
+        headers = {"X-API-Key": self._api_key} if self._api_key else {}
+        try:
+            with httpx.Client(timeout=self._timeout_seconds) as client:
+                response = client.get(f"{self._base_url}{path}", params=params, headers=headers)
+        except httpx.TimeoutException:
+            return self._failure(
+                server_name,
+                tool_name,
+                ErrorCode.TIMEOUT_EXCEEDED,
+                f"mcp_timeout:{tool_name}",
+                retryable=True,
+            )
+        except httpx.HTTPError as exc:
+            return self._failure(
+                server_name,
+                tool_name,
+                ErrorCode.MCP_UNAVAILABLE,
+                f"mcp_unavailable:{tool_name}:{type(exc).__name__}",
+                retryable=True,
+            )
+        data = _response_data(response)
+        if response.is_success:
+            return self._success(server_name, tool_name, data)
+        return self._failure(
+            server_name,
+            tool_name,
+            _error_code_from_response(response, data),
+            _message_from_response(response, data),
+            data=data,
         )
 
     def _post(
@@ -282,6 +435,66 @@ class HelmManagerRestDryRunClient:
         }
         return self._post("/releases/upgrade", payload, "helm.install_upgrade")
 
+    def list_releases(self, *, namespace: str, all_statuses: bool = True) -> McpCallResult:
+        return self._get(
+            "/releases",
+            {
+                "namespace": namespace,
+                "all_statuses": all_statuses,
+                "actor": "bosgenesis-mop-execution-agent",
+            },
+            "helm.list",
+        )
+
+    def status(self, *, release_name: str, namespace: str) -> McpCallResult:
+        return self._get(
+            f"/releases/{release_name}/status",
+            {"namespace": namespace, "actor": "bosgenesis-mop-execution-agent"},
+            "helm.status",
+        )
+
+    def rollback(
+        self,
+        *,
+        release_name: str,
+        namespace: str,
+        revision: int,
+        dry_run: bool = False,
+    ) -> McpCallResult:
+        payload = {
+            "release_name": release_name,
+            "namespace": namespace,
+            "revision": revision,
+            "dry_run": dry_run,
+            "wait": self._mutation_wait,
+            "timeout": self._helm_operation_timeout,
+            "actor": "bosgenesis-mop-execution-agent",
+            "correlation_id": self._correlation_id,
+        }
+        return self._post("/releases/rollback", payload, "helm.rollback")
+
+    def uninstall(
+        self,
+        *,
+        release_name: str,
+        namespace: str,
+        dry_run: bool = False,
+        keep_history: bool = False,
+        force_purge_release_storage: bool = False,
+    ) -> McpCallResult:
+        payload = {
+            "release_name": release_name,
+            "namespace": namespace,
+            "dry_run": dry_run,
+            "keep_history": keep_history,
+            "force_purge_release_storage": force_purge_release_storage,
+            "wait": self._mutation_wait,
+            "timeout": self._helm_operation_timeout,
+            "actor": "bosgenesis-mop-execution-agent",
+            "correlation_id": self._correlation_id,
+        }
+        return self._post("/releases/uninstall", payload, "helm.uninstall")
+
     def _ensure_repo(
         self,
         *,
@@ -304,6 +517,60 @@ class HelmManagerRestDryRunClient:
         try:
             with httpx.Client(timeout=self._timeout_seconds) as client:
                 response = client.post(f"{self._base_url}{path}", json=payload, headers=headers)
+        except httpx.TimeoutException:
+            return _standalone_failure(
+                self._job_id,
+                "bosgenesis_helm",
+                tool_name,
+                ErrorCode.TIMEOUT_EXCEEDED,
+                f"mcp_timeout:{tool_name}",
+                self._correlation_id,
+                self._trace_id,
+                retryable=True,
+            )
+        except httpx.HTTPError as exc:
+            return _standalone_failure(
+                self._job_id,
+                "bosgenesis_helm",
+                tool_name,
+                ErrorCode.MCP_UNAVAILABLE,
+                f"mcp_unavailable:{tool_name}:{type(exc).__name__}",
+                self._correlation_id,
+                self._trace_id,
+                retryable=True,
+            )
+
+        data = _response_data(response)
+        if response.is_success:
+            return _standalone_success(
+                self._job_id,
+                "bosgenesis_helm",
+                tool_name,
+                data,
+                self._correlation_id,
+                self._trace_id,
+            )
+        return _standalone_failure(
+            self._job_id,
+            "bosgenesis_helm",
+            tool_name,
+            _error_code_from_response(response, data),
+            _message_from_response(response, data),
+            self._correlation_id,
+            self._trace_id,
+            data=data,
+        )
+
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any],
+        tool_name: str,
+    ) -> McpCallResult:
+        headers = {"X-API-Key": self._api_key} if self._api_key else {}
+        try:
+            with httpx.Client(timeout=self._timeout_seconds) as client:
+                response = client.get(f"{self._base_url}{path}", params=params, headers=headers)
         except httpx.TimeoutException:
             return _standalone_failure(
                 self._job_id,
@@ -433,6 +700,18 @@ def _error_code_from_response(response: httpx.Response, data: dict[str, Any]) ->
 def _message_from_response(response: httpx.Response, data: dict[str, Any]) -> str:
     detail = data.get("detail") or data.get("message") or data.get("error") or data
     return f"http_{response.status_code}:{redact_value(detail)}"
+
+
+def _compat_error(error_code: ErrorCode, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": {
+            "error_code": error_code.value,
+            "message": str(redact_value(message)),
+            "retryable": error_code
+            in {ErrorCode.TIMEOUT_EXCEEDED, ErrorCode.MCP_UNAVAILABLE},
+        },
+    }
 
 
 def _standalone_success(

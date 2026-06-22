@@ -9,6 +9,7 @@ from bosgenesis_mop_execution_agent.models import (
     ActorType,
     AuditEvent,
     ExecutionJob,
+    ExecutionMode,
     ExternalInstruction,
     InstructionType,
     JobState,
@@ -32,7 +33,6 @@ UNSAFE_WITHOUT_DEDICATED_POLICY = {
     InstructionType.PATCH_MANIFEST,
     InstructionType.REPLACE_MANIFEST,
     InstructionType.INVOKE_MCP_TOOL,
-    InstructionType.ROLLBACK,
 }
 
 
@@ -100,6 +100,8 @@ class InstructionGate:
         }
         if job.state in {JobState.AWAITING_HUMAN_APPROVAL, JobState.EXECUTING}:
             allowed_non_decision.add(InstructionType.CONTINUE)
+        if job.state == JobState.ROLLBACK_REQUESTED:
+            allowed_non_decision.add(InstructionType.ROLLBACK)
         if (
             job.state != JobState.DECISION_REQUIRED
             and instruction.instruction_type not in allowed_non_decision
@@ -108,6 +110,16 @@ class InstructionGate:
                 _block(
                     "INSTRUCTION_STATE_MISMATCH",
                     "Instruction can only resume a decision-required job.",
+                )
+            )
+        if (
+            instruction.instruction_type == InstructionType.ROLLBACK
+            and job.state != JobState.ROLLBACK_REQUESTED
+        ):
+            blocks.append(
+                _block(
+                    "ROLLBACK_STATE_REQUIRED",
+                    "Rollback instructions require a rollback-requested job.",
                 )
             )
         if instruction.instruction_type in UNSAFE_WITHOUT_DEDICATED_POLICY:
@@ -136,28 +148,49 @@ class InstructionGate:
                 job.model_copy(update={"state": JobState.CANCELLED, "blocked": False})
             )
             return
+        if instruction.instruction_type == InstructionType.ROLLBACK:
+            self._repository.save_job(
+                job.model_copy(
+                    update={
+                        "decision_required": False,
+                        "blocked": False,
+                    }
+                )
+            )
+            return
         if instruction.instruction_type in {InstructionType.CONTINUE, InstructionType.RETRY}:
             if job.state in {JobState.AWAITING_HUMAN_APPROVAL, JobState.EXECUTING}:
                 return
+            resume_mutation = (
+                job.execution_mode == ExecutionMode.EXECUTE_AFTER_APPROVAL
+                and job.dry_run_satisfied
+            )
+            resumed_step_state = (
+                StepState.DRY_RUN_SUCCEEDED if resume_mutation else StepState.PENDING
+            )
             for step in self._repository.get_steps(job.job_id):
                 if instruction.target_step_id and step.step_id != instruction.target_step_id:
                     continue
                 if step.state == StepState.DECISION_REQUIRED:
+                    update = {
+                        "state": resumed_step_state,
+                        "mutation_status": None,
+                        "validation_status": None,
+                    }
+                    if resume_mutation:
+                        update["dry_run_status"] = StepState.DRY_RUN_SUCCEEDED
+                    else:
+                        update["dry_run_status"] = None
                     self._repository.save_step(
-                        step.model_copy(
-                            update={
-                                "state": StepState.PENDING,
-                                "dry_run_status": None,
-                                "mutation_status": None,
-                                "validation_status": None,
-                            }
-                        )
+                        step.model_copy(update=update)
                     )
                     break
             self._repository.save_job(
                 job.model_copy(
                     update={
-                        "state": JobState.DRY_RUN_READY,
+                        "state": (
+                            JobState.EXECUTING if resume_mutation else JobState.DRY_RUN_READY
+                        ),
                         "decision_required": False,
                         "blocked": False,
                     }

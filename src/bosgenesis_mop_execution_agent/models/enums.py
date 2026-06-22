@@ -130,5 +130,6 @@ class ReportType(StrEnum):
     EXECUTION_SUMMARY = "execution_summary"
     VALIDATION_REPORT = "validation_report"
     ROLLBACK_REPORT = "rollback_report"
+    CHANGE_REPORT = "change_report"
     RELEASE_NOTES = "release_notes"
     AUDIT_EXPORT = "audit_export"

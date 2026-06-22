@@ -184,15 +184,17 @@ Goal: implement memory as execution context only. Requirement coverage: `[FR-027
 
 Goal: produce operator-ready outputs after execution. Requirement coverage: `[FR-034] [FR-035] [FR-036] [FR-039] [AC-025] [AC-026]`.
 
-- [ ] [FR-035] Implement validation executor for resources, rollout, pods, services, ingress, PVCs, Helm status, and custom plan validations.
-- [ ] [FR-036] Implement rollback request flow requiring external instruction and human approval.
-- [ ] [FR-036] Implement rollback executor through Helm and K8s MCPs.
-- [ ] [FR-034] Implement execution report generator.
-- [ ] [FR-035] Implement validation report generator.
-- [ ] [FR-036] Implement rollback report generator.
-- [ ] [FR-024][AC-026] Implement release-note MCP integration.
-- [ ] [FR-039] Implement report artifact metadata and archive generation.
-- [ ] [AC-025] Add report content, trace ID, warning, observation, and redaction tests.
+- [x] [FR-035] Implement validation executor for resources, rollout, pods, services, ingress, PVCs, Helm status, and custom plan validations.
+- [x] [FR-036] Implement rollback request flow requiring external instruction and human approval.
+- [x] [FR-036] Implement rollback executor through Helm and K8s MCPs.
+- [x] [FR-034] Implement execution report generator.
+- [x] [FR-035] Implement validation report generator.
+- [x] [FR-036] Implement rollback report generator.
+- [x] [FR-024][AC-026] Implement release-note MCP integration.
+- [x] [FR-039] Implement report artifact metadata and archive generation.
+- [x] [AC-025] Add report content, trace ID, warning, observation, and redaction tests.
+- [x] [DEMO] Add MCP namespace revert capability for resetting target namespaces such as `agent-testing`.
+- [x] [DEMO] Add target namespace change report artifacts in Markdown, HTML, PDF, and archive formats.
 
 ## Phase 13 - Observability and Operations
 
@@ -217,7 +219,7 @@ Goal: package the service for deployment. Requirement coverage: `[NFR-012] [NFR-
 - [x] [NFR-006] Define worker concurrency and namespace lock behavior.
 - [x] [FR-025] Define database migration job.
 - [x] [NFR-012] Add deployment runbook, rollback runbook, and sample requests.
-- [ ] [FR-040] Verify deployed service can run a sample dry-run job.
+- [x] [FR-040] Verify deployed service can run a sample dry-run job.
 
 ## Phase 15 - Release Candidate Hardening
 
@@ -239,35 +241,35 @@ Goal: validate production readiness. Requirement coverage: all MUST requirements
 Each scenario must assert deterministic block or `decision_required` with a complete, redacted context envelope.
 
 - [ ] Malformed `machine_execution_plan.yaml`.
-- [ ] Missing generated manifest file.
-- [ ] Generated YAML syntax error.
-- [ ] Manifest namespace mismatch.
-- [ ] Cluster-scoped resource in bundle.
-- [ ] Secret value detected in YAML.
-- [ ] Production data copy command detected.
-- [ ] Mutating step without dry-run.
-- [ ] Mutating step without approval.
-- [ ] Approval scope mismatch.
-- [ ] Kubernetes server-side dry-run failure.
-- [ ] Resource already exists.
-- [ ] Immutable field conflict.
+- [x] Missing generated manifest file.
+- [x] Generated YAML syntax error.
+- [x] Manifest namespace mismatch.
+- [x] Cluster-scoped resource in bundle.
+- [x] Secret value detected in YAML.
+- [x] Production data copy command detected.
+- [x] Mutating step without dry-run.
+- [x] Mutating step without approval.
+- [x] Approval scope mismatch.
+- [x] Kubernetes server-side dry-run failure.
+- [x] Resource already exists.
+- [x] Immutable field conflict.
 - [ ] Helm repo unavailable.
-- [ ] Helm render failure.
+- [x] Helm render failure.
 - [ ] Helm release exists with conflicting metadata.
-- [ ] PVC pending.
-- [ ] Pod unschedulable.
-- [ ] Node unavailable.
+- [x] PVC pending.
+- [x] Pod unschedulable.
+- [x] Node unavailable.
 - [ ] Pod CrashLoopBackOff.
-- [ ] Ingress host/path conflict.
+- [x] Ingress host/path conflict.
 - [ ] Validation timeout.
-- [ ] MCP unavailable.
+- [x] MCP unavailable.
 - [ ] Audit write failure.
 - [ ] Worker restart during wait.
 - [ ] Worker restart after dry-run before mutation.
 - [ ] Duplicate resume request.
-- [ ] Duplicate mutation instruction.
-- [ ] Unsafe external LLM instruction.
-- [ ] Expired approval.
+- [x] Duplicate mutation instruction.
+- [x] Unsafe external LLM instruction.
+- [x] Expired approval.
 
 ## Release Gates
 
@@ -286,18 +288,18 @@ Each scenario must assert deterministic block or `decision_required` with a comp
 
 ## Documentation Deliverables
 
-- [ ] `SPECS.md`.
-- [ ] `PLAN.md`.
-- [ ] `HLD.md`.
-- [ ] `LLD.md`.
+- [x] `SPECS.md`.
+- [x] `PLAN.md`.
+- [x] `HLD.md`.
+- [x] `LLD.md`.
 - [ ] `MACHINE_EXECUTION_PLAN_SCHEMA.md`.
 - [ ] `POLICY.md`.
 - [ ] `MEMORY.md`.
-- [ ] `MCP_CONTRACTS.md`.
-- [ ] `API.md`.
-- [ ] `DEPLOYMENT.md`.
-- [ ] `SAMPLE_REQUESTS.md`.
-- [ ] `RUNBOOK.md`.
+- [x] `MCP_CONTRACTS.md`.
+- [x] `API.md`.
+- [x] `DEPLOYMENT.md`.
+- [x] `SAMPLE_REQUESTS.md`.
+- [x] `RUNBOOK.md`.
 - [ ] `SECURITY_AND_REDACTION.md`.
 - [ ] `RELEASE_CANDIDATE_REPORT.md`.
 

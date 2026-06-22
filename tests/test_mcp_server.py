@@ -42,6 +42,19 @@ def test_mcp_initialize_and_tools_list() -> None:
     tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
     assert "mop_execution_health" in tool_names
     assert "mop_execution_create_job" in tool_names
+    assert "mop_execution_revert_namespace" in tool_names
+    assert "mop_execution_generate_change_report" in tool_names
+    assert "mop_execution_download_report" in tool_names
+    revert_tool = next(
+        tool for tool in tools.json()["result"]["tools"]
+        if tool["name"] == "mop_execution_revert_namespace"
+    )
+    download_tool = next(
+        tool for tool in tools.json()["result"]["tools"]
+        if tool["name"] == "mop_execution_download_report"
+    )
+    assert revert_tool["annotations"]["destructiveHint"] is True
+    assert download_tool["annotations"]["readOnlyHint"] is True
 
 
 def test_mcp_health_tool_call_returns_standard_envelope() -> None:

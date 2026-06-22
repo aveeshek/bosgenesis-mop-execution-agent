@@ -6,7 +6,9 @@ from bosgenesis_mop_execution_agent.runtime.instructions import InstructionDecis
 from bosgenesis_mop_execution_agent.runtime.mutation import MutationActionResult, MutationExecutor
 from bosgenesis_mop_execution_agent.runtime.observations import ObservationBuilder
 from bosgenesis_mop_execution_agent.runtime.queue import InMemoryJobQueue, QueuedJob
+from bosgenesis_mop_execution_agent.runtime.rollback import RollbackExecutor, RollbackResult
 from bosgenesis_mop_execution_agent.runtime.scheduler import PhaseStepScheduler
+from bosgenesis_mop_execution_agent.runtime.validation import ValidationExecutor, ValidationResult
 from bosgenesis_mop_execution_agent.runtime.waits import WaitExecutor
 from bosgenesis_mop_execution_agent.runtime.worker import RuntimeDecision, WorkerRuntime
 
@@ -22,7 +24,11 @@ __all__ = [
     "ObservationBuilder",
     "PhaseStepScheduler",
     "QueuedJob",
+    "RollbackExecutor",
+    "RollbackResult",
     "RuntimeDecision",
+    "ValidationExecutor",
+    "ValidationResult",
     "WaitExecutor",
     "WorkerRuntime",
 ]

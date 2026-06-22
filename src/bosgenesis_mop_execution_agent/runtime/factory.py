@@ -20,6 +20,8 @@ from bosgenesis_mop_execution_agent.runtime.mcp_rest_adapters import (
 )
 from bosgenesis_mop_execution_agent.runtime.mutation import MutationExecutor
 from bosgenesis_mop_execution_agent.runtime.queue import InMemoryJobQueue
+from bosgenesis_mop_execution_agent.runtime.rollback import RollbackExecutor
+from bosgenesis_mop_execution_agent.runtime.validation import ValidationExecutor
 from bosgenesis_mop_execution_agent.runtime.worker import WorkerRuntime
 
 BUNDLE_ROOT_LINK_KEY = "bundle_root_path"
@@ -66,6 +68,16 @@ def create_mutation_executor(
         helm_client=helm_client,
         audit_writer=AppendOnlyAuditWriter(repository),
     )
+
+
+def create_validation_executor(job: ExecutionJob) -> ValidationExecutor:
+    k8s_client, helm_client = _mcp_clients(job)
+    return ValidationExecutor(k8s_client=k8s_client, helm_client=helm_client)
+
+
+def create_rollback_executor(job: ExecutionJob) -> RollbackExecutor:
+    k8s_client, helm_client = _mcp_clients(job)
+    return RollbackExecutor(k8s_client=k8s_client, helm_client=helm_client)
 
 
 def bundle_root_from_job(job: ExecutionJob) -> Path | None:

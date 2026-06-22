@@ -31,7 +31,15 @@ TOOL_NAMES = [
     "mop_execution_get_memory_context",
     "mop_execution_evaluate_policy",
     "mop_execution_request_rollback",
+    "mop_execution_execute_rollback",
+    "mop_execution_revert_namespace",
+    "mop_execution_run_validation",
+    "mop_execution_generate_execution_report",
+    "mop_execution_generate_validation_report",
+    "mop_execution_generate_rollback_report",
+    "mop_execution_generate_change_report",
     "mop_execution_generate_release_notes",
+    "mop_execution_download_report",
 ]
 
 
@@ -46,7 +54,7 @@ READ_ONLY_TOOLS = {
     "mop_execution_list_audit_events",
     "mop_execution_get_memory_context",
     "mop_execution_evaluate_policy",
-    "mop_execution_generate_release_notes",
+    "mop_execution_download_report",
 }
 
 
@@ -109,8 +117,28 @@ def call_tool(
         envelope = effective_service.memory_context(str(args.get("job_id", "")), args)
     elif name == "mop_execution_request_rollback":
         envelope = effective_service.request_rollback(str(args.get("job_id", "")), args)
+    elif name == "mop_execution_execute_rollback":
+        envelope = effective_service.execute_rollback(str(args.get("job_id", "")), args)
+    elif name == "mop_execution_revert_namespace":
+        envelope = effective_service.revert_namespace(args)
+    elif name == "mop_execution_run_validation":
+        envelope = effective_service.run_validation(str(args.get("job_id", "")))
+    elif name == "mop_execution_generate_execution_report":
+        envelope = effective_service.generate_execution_report(str(args.get("job_id", "")))
+    elif name == "mop_execution_generate_validation_report":
+        envelope = effective_service.generate_validation_report(str(args.get("job_id", "")))
+    elif name == "mop_execution_generate_rollback_report":
+        envelope = effective_service.generate_rollback_report(str(args.get("job_id", "")))
+    elif name == "mop_execution_generate_change_report":
+        envelope = effective_service.generate_change_report(str(args.get("job_id", "")))
     elif name == "mop_execution_generate_release_notes":
         envelope = effective_service.generate_release_notes(str(args.get("job_id", "")))
+    elif name == "mop_execution_download_report":
+        envelope = effective_service.report_download_metadata(
+            str(args.get("job_id", "")),
+            str(args.get("report_id", "")),
+            str(args.get("artifact") or "pdf"),
+        )
     elif name in TOOL_NAMES:
         envelope = _not_implemented(name)
     else:
@@ -142,7 +170,12 @@ def _tool_definition(name: str) -> dict[str, Any]:
         },
         "annotations": {
             "readOnlyHint": name in READ_ONLY_TOOLS,
-            "destructiveHint": name in {"mop_execution_request_rollback"},
+            "destructiveHint": name
+            in {
+                "mop_execution_request_rollback",
+                "mop_execution_execute_rollback",
+                "mop_execution_revert_namespace",
+            },
             "idempotentHint": name in READ_ONLY_TOOLS,
             "openWorldHint": False,
         },
@@ -173,14 +206,66 @@ def _tool_description(name: str) -> str:
         "mop_execution_request_rollback": (
             "Request rollback with explicit instruction and approval context."
         ),
+        "mop_execution_execute_rollback": (
+            "Execute an approved rollback through governed Helm and Kubernetes MCP clients."
+        ),
+        "mop_execution_revert_namespace": (
+            "Revert a target namespace by deleting Helm releases and namespaced resources."
+        ),
+        "mop_execution_run_validation": (
+            "Run post-execution validation for resources, rollout, PVCs, ingress, and Helm status."
+        ),
+        "mop_execution_generate_execution_report": (
+            "Generate Markdown, HTML, PDF, and zip execution report artifacts."
+        ),
+        "mop_execution_generate_validation_report": (
+            "Generate Markdown, HTML, PDF, and zip validation report artifacts."
+        ),
+        "mop_execution_generate_rollback_report": (
+            "Generate Markdown, HTML, PDF, and zip rollback report artifacts."
+        ),
+        "mop_execution_generate_change_report": (
+            "Generate a target-namespace change report in Markdown, HTML, PDF, and zip."
+        ),
         "mop_execution_generate_release_notes": (
             "Generate release notes for reportable execution state."
+        ),
+        "mop_execution_download_report": (
+            "Return REST download metadata and link for a report artifact without streaming bytes."
         ),
     }
     return descriptions[name]
 
 
 def _tool_properties(name: str) -> dict[str, Any]:
+    if name == "mop_execution_execute_rollback":
+        return {
+            "job_id": {"type": "string"},
+            "confirm": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "mode": {"type": "string"},
+            "release_name": {"type": "string"},
+            "revision": {"type": "integer"},
+            "force_purge_release_storage": {"type": "boolean"},
+        }
+    if name == "mop_execution_revert_namespace":
+        return {
+            "target_namespace": {"type": "string"},
+            "confirm": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "job_id": {"type": "string"},
+            "release_name": {"type": "string"},
+            "force_purge_release_storage": {"type": "boolean"},
+        }
+    if name == "mop_execution_download_report":
+        return {
+            "job_id": {"type": "string"},
+            "report_id": {"type": "string"},
+            "artifact": {
+                "type": "string",
+                "enum": ["markdown", "html", "pdf", "archive"],
+            },
+        }
     if name in {
         "mop_execution_get_job",
         "mop_execution_start_job",
@@ -193,6 +278,12 @@ def _tool_properties(name: str) -> dict[str, Any]:
         "mop_execution_list_audit_events",
         "mop_execution_get_memory_context",
         "mop_execution_request_rollback",
+        "mop_execution_execute_rollback",
+        "mop_execution_run_validation",
+        "mop_execution_generate_execution_report",
+        "mop_execution_generate_validation_report",
+        "mop_execution_generate_rollback_report",
+        "mop_execution_generate_change_report",
         "mop_execution_generate_release_notes",
     }:
         if name == "mop_execution_get_memory_context":
