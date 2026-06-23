@@ -28,7 +28,11 @@ data:
   MOP_EXECUTION_API_BACKGROUND_WORKER_ENABLED: {{ .Values.config.apiBackgroundWorkerEnabled | quote }}
   MOP_EXECUTION_API_WORKER_IDLE_SLEEP_SECONDS: {{ .Values.config.apiWorkerIdleSleepSeconds | quote }}
   OTEL_ENABLED: {{ .Values.config.enableOtel | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.config.otelServiceName | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.signozEndpoint | quote }}
+  OTEL_EXPORTER_OTLP_INSECURE: {{ .Values.config.otelExporterOtlpInsecure | quote }}
   SIGNOZ_ENDPOINT: {{ .Values.config.signozEndpoint | quote }}
+  METRICS_ENABLED: {{ .Values.config.metricsEnabled | quote }}
   LANGFUSE_ENABLED: {{ .Values.config.langfuseEnabled | quote }}
   K8S_INSPECTOR_MCP_ENDPOINT: {{ .Values.config.k8sInspectorMcpEndpoint | quote }}
   HELM_MANAGER_MCP_ENDPOINT: {{ .Values.config.helmManagerMcpEndpoint | quote }}

@@ -1,0 +1,54 @@
+{
+  "title": "BOS Genesis MoP Execution Agent",
+  "description": "Placeholder SigNoz dashboard for Phase 13 observability.",
+  "tags": [
+    "bosgenesis",
+    "mop-execution-agent"
+  ],
+  "panels": [
+    {
+      "title": "Jobs by State",
+      "query": "bosgenesis_mop_execution_job_state"
+    },
+    {
+      "title": "Job Duration",
+      "query": "bosgenesis_mop_execution_job_duration_seconds_sum / bosgenesis_mop_execution_job_duration_seconds_count"
+    },
+    {
+      "title": "MCP Latency",
+      "query": "bosgenesis_mop_execution_mcp_latency_seconds_sum / bosgenesis_mop_execution_mcp_latency_seconds_count"
+    },
+    {
+      "title": "MCP Failures",
+      "query": "bosgenesis_mop_execution_mcp_calls_total{success=\"false\"}"
+    },
+    {
+      "title": "Decision Required",
+      "query": "bosgenesis_mop_execution_decision_required_total"
+    },
+    {
+      "title": "Policy Blocks",
+      "query": "bosgenesis_mop_execution_policy_blocks_total"
+    },
+    {
+      "title": "Audit Failures",
+      "query": "bosgenesis_mop_execution_audit_failures_total"
+    },
+    {
+      "title": "Namespace Lock Contention",
+      "query": "bosgenesis_mop_execution_lock_contention_total"
+    },
+    {
+      "title": "Redactions",
+      "query": "bosgenesis_mop_execution_redactions_total"
+    },
+    {
+      "title": "HTTP Latency",
+      "query": "bosgenesis_mop_execution_http_request_seconds_sum / bosgenesis_mop_execution_http_request_seconds_count"
+    }
+  ],
+  "notes": [
+    "Import shape is intentionally vendor-neutral; adapt panel schema to the installed SigNoz version.",
+    "For production volume, avoid high-cardinality job labels in long-retention dashboards."
+  ]
+}

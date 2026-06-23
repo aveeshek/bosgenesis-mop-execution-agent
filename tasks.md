@@ -200,13 +200,13 @@ Goal: produce operator-ready outputs after execution. Requirement coverage: `[FR
 
 Goal: make the service production-operable. Requirement coverage: `[NFR-009] [NFR-013] [FR-038]`.
 
-- [ ] [NFR-009] Add structured JSON logging.
-- [ ] [NFR-009] Add OpenTelemetry tracing and SigNoz exporter configuration.
-- [ ] [NFR-009] Add metrics for job states, durations, MCP latency, policy blocks, decision-required counts, approval wait, redactions, audit failures, and lock contention.
-- [ ] [FR-038] Finalize liveness/readiness probes.
-- [ ] [NFR-013] Ensure logs, metrics, traces, and persisted records include job/correlation/trace IDs.
-- [ ] [NFR-009] Add dashboard JSON placeholders or dashboard/runbook notes.
-- [ ] [NFR-009] Add alerting recommendations.
+- [x] [NFR-009] Add structured JSON logging.
+- [x] [NFR-009] Add OpenTelemetry tracing and SigNoz exporter configuration.
+- [x] [NFR-009] Add metrics for job states, durations, MCP latency, policy blocks, decision-required counts, approval wait, redactions, audit failures, and lock contention.
+- [x] [FR-038] Finalize liveness/readiness probes.
+- [x] [NFR-013] Ensure logs, metrics, traces, and persisted records include job/correlation/trace IDs.
+- [x] [NFR-009] Add dashboard JSON placeholders or dashboard/runbook notes.
+- [x] [NFR-009] Add alerting recommendations.
 
 ## Phase 14 - Deployment and Runtime Configuration
 
@@ -300,6 +300,7 @@ Each scenario must assert deterministic block or `decision_required` with a comp
 - [x] `DEPLOYMENT.md`.
 - [x] `SAMPLE_REQUESTS.md`.
 - [x] `RUNBOOK.md`.
+- [x] `OBSERVABILITY.md`.
 - [ ] `SECURITY_AND_REDACTION.md`.
 - [ ] `RELEASE_CANDIDATE_REPORT.md`.
 

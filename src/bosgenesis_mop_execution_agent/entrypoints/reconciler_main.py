@@ -8,6 +8,11 @@ import time
 from pathlib import Path
 
 from bosgenesis_mop_execution_agent.common.ids import new_id
+from bosgenesis_mop_execution_agent.observability import (
+    configure_logging,
+    configure_tracing,
+    log_event,
+)
 from bosgenesis_mop_execution_agent.persistence import InMemoryRedisLikeClient
 from bosgenesis_mop_execution_agent.persistence.repositories import JsonExecutionRepository
 from bosgenesis_mop_execution_agent.runtime import InMemoryJobQueue
@@ -16,14 +21,18 @@ from bosgenesis_mop_execution_agent.runtime.factory import create_worker_runtime
 
 def main() -> None:
     """Run periodic persisted-state reconciliation without performing new mutations."""
+    configure_logging()
+    configure_tracing()
     interval_seconds = int(os.getenv("RECONCILER_INTERVAL_SECONDS", "60"))
-    repository = JsonExecutionRepository(_repository_path())
+    repo_path = _repository_path()
+    repository = JsonExecutionRepository(repo_path)
     runtime = create_worker_runtime(
         repository=repository,
         queue=InMemoryJobQueue(repository),
         redis_client=InMemoryRedisLikeClient(),
         worker_id=os.getenv("RECONCILER_ID", new_id("reconciler")),
     )
+    log_event("reconciler_started", repository_path=str(repo_path))
     while True:
         runtime.reconcile_after_restart()
         time.sleep(interval_seconds)

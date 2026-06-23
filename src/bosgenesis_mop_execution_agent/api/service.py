@@ -36,6 +36,15 @@ from bosgenesis_mop_execution_agent.models import (
     ReportType,
 )
 from bosgenesis_mop_execution_agent.models.enums import ExecutionMode
+from bosgenesis_mop_execution_agent.observability.logging import log_event
+from bosgenesis_mop_execution_agent.observability.metrics import (
+    record_approval_wait,
+    record_audit_failure,
+    record_job_state,
+    record_policy_blocks,
+    record_redaction,
+)
+from bosgenesis_mop_execution_agent.observability.tracing import tracing_status
 from bosgenesis_mop_execution_agent.persistence import (
     InMemoryRedisLikeClient,
 )
@@ -105,9 +114,31 @@ class MopExecutionApiService:
         )
 
     def ready(self) -> dict[str, Any]:
-        return self._ok(
-            "MoP Execution Agent is ready.",
-            data={"status": "ready", "service": "bosgenesis-mop-execution-agent"},
+        repository_parent = self._repository.path.parent
+        checks = {
+            "repository_parent_exists": repository_parent.exists(),
+            "repository_parent_writable": _path_writable(repository_parent),
+            "background_worker_enabled": _env_bool(
+                "MOP_EXECUTION_API_BACKGROUND_WORKER_ENABLED",
+                default=True,
+            ),
+            "background_worker_running": self._worker_thread is not None
+            and self._worker_thread.is_alive(),
+            "otel": tracing_status(),
+        }
+        ready = bool(checks["repository_parent_exists"] and checks["repository_parent_writable"])
+        data = {
+            "status": "ready" if ready else "not_ready",
+            "service": "bosgenesis-mop-execution-agent",
+            "checks": checks,
+            "repository_path": str(self._repository.path),
+        }
+        if ready:
+            return self._ok("MoP Execution Agent is ready.", data=data)
+        return self._error(
+            "MoP Execution Agent is not ready.",
+            code="SERVICE_NOT_READY",
+            data=data,
         )
 
     def capabilities(self) -> dict[str, Any]:
@@ -141,6 +172,12 @@ class MopExecutionApiService:
                     "langfuse_secret_key": "[REDACTED]",
                 },
                 "guardrails": capabilities_payload()["guardrails"],
+                "observability": {
+                    "log_format": os.getenv("LOG_FORMAT", "json"),
+                    "log_level": os.getenv("LOG_LEVEL", "INFO"),
+                    "metrics_endpoint": "/metrics",
+                    "otel": tracing_status(),
+                },
             },
             redact_data=False,
         )
@@ -246,6 +283,14 @@ class MopExecutionApiService:
             namespace=job.target_namespace,
             tenant=payload.get("tenant"),
             environment=payload.get("environment"),
+        )
+        log_event(
+            "execution_job_created",
+            job_id=job.job_id,
+            target_namespace=job.target_namespace,
+            state=job.state.value,
+            correlation_id=job.correlation_id,
+            trace_id=job.trace_id,
         )
         return self._ok(
             "Execution job created.",
@@ -697,6 +742,7 @@ class MopExecutionApiService:
         self._save_job(job)
         self._add_observation(job_id, "Human approval submitted.", {"approval": _dump(approval)})
         self._add_audit(job_id, "approval_submitted", {"approval_id": approval.approval_id})
+        record_approval_wait(job, utc_now())
         self._write_memory(
             MemoryLayer.APPROVAL,
             job_id,
@@ -1060,6 +1106,7 @@ class MopExecutionApiService:
 
     def preview_redaction(self, payload: dict[str, Any]) -> dict[str, Any]:
         content = payload.get("content", payload)
+        record_redaction("redaction_preview")
         return self._ok(
             "Redaction preview returned.",
             data={
@@ -1085,6 +1132,8 @@ class MopExecutionApiService:
                 to_state=target_state,
                 actor_type=ActorType.WORKER,
                 reason=reason,
+                correlation_id=job.correlation_id,
+                trace_id=job.trace_id,
                 details=details,
             )
         except InvalidTransitionError as exc:
@@ -1109,7 +1158,16 @@ class MopExecutionApiService:
         self._observations.setdefault(job_id, []).append(result.observation)
         self._audit_events.setdefault(job_id, []).append(result.audit_event)
         self._repository.add_observation(result.observation)
-        self._repository.append_audit_event(result.audit_event)
+        try:
+            self._repository.append_audit_event(result.audit_event)
+        except Exception:
+            record_audit_failure(
+                action=result.audit_event.action,
+                job_id=job_id,
+                correlation_id=job.correlation_id,
+                trace_id=job.trace_id,
+            )
+            raise
         self._write_memory(
             MemoryLayer.EPISODIC_EXECUTION,
             job_id,
@@ -1124,6 +1182,15 @@ class MopExecutionApiService:
             result.audit_event.model_dump(mode="json"),
             namespace=updated.target_namespace,
         )
+        log_event(
+            "job_state_transition",
+            job_id=job_id,
+            target_namespace=updated.target_namespace,
+            from_state=job.state.value,
+            to_state=target_state.value,
+            correlation_id=updated.correlation_id,
+            trace_id=updated.trace_id,
+        )
         return self._ok(
             reason,
             data={"job": _dump(updated), "transition": result.transition.model_dump(mode="json")},
@@ -1132,12 +1199,15 @@ class MopExecutionApiService:
         )
 
     def _add_observation(self, job_id: str, summary: str, result: dict[str, Any]) -> None:
+        job = self._get_job(job_id)
         observation = Observation(
             observation_id=new_id("obs"),
             job_id=job_id,
             severity=ObservationSeverity.INFO,
             observation_type=ObservationType.POLICY_CHECK,
             summary=summary,
+            correlation_id=job.correlation_id if job else None,
+            trace_id=job.trace_id if job else None,
             result=cast("dict[str, Any]", redact_value(result)),
         )
         self._record_observation(observation)
@@ -1293,17 +1363,28 @@ class MopExecutionApiService:
         }
 
     def _add_audit(self, job_id: str, action: str, details: dict[str, Any]) -> None:
+        job = self._get_job(job_id)
         event = AuditEvent(
             audit_event_id=new_id("audit"),
             actor_type=ActorType.WORKER,
             action=action,
             job_id=job_id,
+            correlation_id=job.correlation_id if job else None,
+            trace_id=job.trace_id if job else None,
             details=cast("dict[str, Any]", redact_value(details)),
             redacted=True,
         )
         self._audit_events.setdefault(job_id, []).append(event)
-        self._repository.append_audit_event(event)
-        job = self._get_job(job_id)
+        try:
+            self._repository.append_audit_event(event)
+        except Exception:
+            record_audit_failure(
+                action=action,
+                job_id=job_id,
+                correlation_id=job.correlation_id if job else None,
+                trace_id=job.trace_id if job else None,
+            )
+            raise
         self._write_memory(
             MemoryLayer.AUDIT,
             job_id,
@@ -1346,6 +1427,7 @@ class MopExecutionApiService:
     def _save_job(self, job: ExecutionJob) -> None:
         self._jobs[job.job_id] = job
         self._repository.save_job(job)
+        record_job_state(job)
 
     def _get_job(self, job_id: str) -> ExecutionJob | None:
         return self._repository.get_job(job_id) or self._jobs.get(job_id)
@@ -1406,6 +1488,21 @@ class MopExecutionApiService:
         redact_data: bool = True,
     ) -> dict[str, Any]:
         response_data = redact_value(data or {}) if redact_data else data or {}
+        job = self._get_job(job_id) if job_id else None
+        if redact_data:
+            record_redaction(
+                "api_response",
+                job_id=job_id,
+                correlation_id=job.correlation_id if job else None,
+                trace_id=job.trace_id if job else None,
+            )
+        if policy_blocks:
+            record_policy_blocks(
+                policy_blocks,
+                job_id=job_id,
+                correlation_id=job.correlation_id if job else None,
+                trace_id=job.trace_id if job else None,
+            )
         return {
             "ok": True,
             "message": message,
@@ -1438,6 +1535,20 @@ class MopExecutionApiService:
         bundle_id: str | None = None,
         state: JobState | None = None,
     ) -> dict[str, Any]:
+        policy_block = {"code": code, "message": message, "severity": "block"}
+        job = self._get_job(job_id) if job_id else None
+        record_redaction(
+            "api_error",
+            job_id=job_id,
+            correlation_id=job.correlation_id if job else None,
+            trace_id=job.trace_id if job else None,
+        )
+        record_policy_blocks(
+            [policy_block],
+            job_id=job_id,
+            correlation_id=job.correlation_id if job else None,
+            trace_id=job.trace_id if job else None,
+        )
         return {
             "ok": False,
             "message": message,
@@ -1446,7 +1557,7 @@ class MopExecutionApiService:
             "state": state.value if state is not None else None,
             "data": redact_value(data or {}),
             "observations": [],
-            "policy_blocks": [{"code": code, "message": message, "severity": "block"}],
+            "policy_blocks": [policy_block],
             "next_required_decision": None,
             "redaction_applied": True,
         }
@@ -1562,6 +1673,17 @@ def _artifact_root_path(repository_path: Path) -> Path:
     if configured:
         return Path(configured)
     return repository_path.parent
+
+
+def _path_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".readyz-write-check"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 
 def _execution_mode(value: Any) -> ExecutionMode:

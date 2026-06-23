@@ -8,6 +8,11 @@ import time
 from pathlib import Path
 
 from bosgenesis_mop_execution_agent.common.ids import new_id
+from bosgenesis_mop_execution_agent.observability import (
+    configure_logging,
+    configure_tracing,
+    log_event,
+)
 from bosgenesis_mop_execution_agent.persistence import (
     InMemoryRedisLikeClient,
 )
@@ -18,6 +23,8 @@ from bosgenesis_mop_execution_agent.runtime.factory import create_worker_runtime
 
 def main() -> None:
     """Run the deterministic worker loop."""
+    configure_logging()
+    configure_tracing()
     interval_seconds = float(os.getenv("WORKER_HEARTBEAT_INTERVAL_SECONDS", "5"))
     repo_path = _repository_path()
     worker_id = os.getenv("WORKER_ID", new_id("worker"))
@@ -31,6 +38,7 @@ def main() -> None:
         worker_id=worker_id,
     )
     runtime.recover_restartable_jobs()
+    log_event("worker_started", worker_id=worker_id, repository_path=str(repo_path))
     while True:
         runtime.run_once()
         time.sleep(interval_seconds)

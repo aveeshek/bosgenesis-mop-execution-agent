@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -21,6 +22,7 @@ from bosgenesis_mop_execution_agent.models import (
     ObservationSeverity,
     ObservationType,
 )
+from bosgenesis_mop_execution_agent.observability.metrics import record_mcp_call
 from bosgenesis_mop_execution_agent.security import redact_value
 
 
@@ -76,12 +78,13 @@ class McpClientBase:
         mutating: bool = False,
     ) -> McpCallResult:
         """Call an MCP tool and normalize success/failure without worker reasoning."""
+        started = time.perf_counter()
         audit_event = self._build_audit_event(tool_name, arguments)
         try:
             if self._audit_hook is not None:
                 self._audit_hook(audit_event)
         except Exception as exc:
-            return self._failure_result(
+            result = self._failure_result(
                 tool_name=tool_name,
                 error=McpStructuredError(
                     error_code=ErrorCode.AUDIT_WRITE_FAILED,
@@ -92,6 +95,8 @@ class McpClientBase:
                 attempts=1,
                 audit_event=audit_event,
             )
+            self._record_mcp_metrics(tool_name, result, started)
+            return result
 
         attempts = self._max_safe_retries + 1 if safe_retry and not mutating else 1
         last_error: McpStructuredError | None = None
@@ -114,7 +119,9 @@ class McpClientBase:
                 )
                 if attempt < attempts:
                     continue
-                return self._failure_result(tool_name, last_error, attempt, audit_event)
+                result = self._failure_result(tool_name, last_error, attempt, audit_event)
+                self._record_mcp_metrics(tool_name, result, started)
+                return result
             except McpTransportError as exc:
                 last_error = McpStructuredError(
                     error_code=ErrorCode.MCP_UNAVAILABLE,
@@ -124,18 +131,43 @@ class McpClientBase:
                 )
                 if attempt < attempts:
                     continue
-                return self._failure_result(tool_name, last_error, attempt, audit_event)
+                result = self._failure_result(tool_name, last_error, attempt, audit_event)
+                self._record_mcp_metrics(tool_name, result, started)
+                return result
 
             parsed = self._parse_raw_result(raw_result)
             if parsed.error is not None:
-                return self._failure_result(tool_name, parsed.error, attempt, audit_event)
-            return self._success_result(tool_name, parsed.data or {}, attempt, audit_event)
+                result = self._failure_result(tool_name, parsed.error, attempt, audit_event)
+                self._record_mcp_metrics(tool_name, result, started)
+                return result
+            result = self._success_result(tool_name, parsed.data or {}, attempt, audit_event)
+            self._record_mcp_metrics(tool_name, result, started)
+            return result
 
         fallback = last_error or McpStructuredError(
             error_code=ErrorCode.UNKNOWN_ERROR,
             message=f"mcp_unknown_failure:{tool_name}",
         )
-        return self._failure_result(tool_name, fallback, attempts, audit_event)
+        result = self._failure_result(tool_name, fallback, attempts, audit_event)
+        self._record_mcp_metrics(tool_name, result, started)
+        return result
+
+    def _record_mcp_metrics(
+        self,
+        tool_name: str,
+        result: McpCallResult,
+        started: float,
+    ) -> None:
+        record_mcp_call(
+            server_name=self.server_name,
+            tool_name=tool_name,
+            success=result.success,
+            duration_seconds=time.perf_counter() - started,
+            job_id=self._job_id,
+            correlation_id=self._correlation_id,
+            trace_id=self._trace_id,
+            error_code=result.error.error_code.value if result.error else None,
+        )
 
     def _parse_raw_result(self, raw_result: dict[str, Any]) -> _ParsedMcpResult:
         if not isinstance(raw_result, dict):

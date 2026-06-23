@@ -22,7 +22,24 @@ SKIP_IMAGE_TRANSFER=true \
 ```bash
 kubectl port-forward -n bosgenesis svc/bosgenesis-mop-execution-agent 8080:8080
 curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
+curl http://localhost:8080/metrics
 ```
+
+`/healthz` is the liveness probe. `/readyz` verifies the repository backing path
+and reports worker and OpenTelemetry status. `/metrics` exposes Prometheus text
+metrics for SigNoz or another scraper.
+
+## Observability
+
+See `docs/OBSERVABILITY.md` for:
+
+- JSON log fields and redaction behavior.
+- SigNoz OpenTelemetry exporter configuration.
+- Metric names for jobs, MCP calls, policy blocks, decisions, approvals,
+  redactions, audit failures, and lock contention.
+- Dashboard placeholder: `docs/dashboards/mop-execution-agent-dashboard.json`.
+- Alerting recommendations.
 
 ## Rollback / Undeploy
 

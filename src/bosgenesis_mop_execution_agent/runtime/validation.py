@@ -1,4 +1,4 @@
-"""Post-execution validation through governed MCP companion clients."""
+﻿"""Post-execution validation through governed MCP companion clients."""
 
 from __future__ import annotations
 
@@ -173,7 +173,13 @@ def _custom_plan_checks(steps: list[ExecutionStep]) -> list[ValidationCheck]:
 
 
 def _items(data: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = data.get("result") or data.get("items") or data.get("output") or []
+    raw = (
+        data.get("result")
+        or data.get("items")
+        or data.get("response")
+        or data.get("output")
+        or []
+    )
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 

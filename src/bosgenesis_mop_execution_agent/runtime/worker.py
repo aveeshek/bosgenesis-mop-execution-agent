@@ -23,6 +23,13 @@ from bosgenesis_mop_execution_agent.models import (
     StepState,
     StepType,
 )
+from bosgenesis_mop_execution_agent.observability.logging import log_event
+from bosgenesis_mop_execution_agent.observability.metrics import (
+    record_audit_failure,
+    record_decision_required,
+    record_job_state,
+    record_lock_contention,
+)
 from bosgenesis_mop_execution_agent.persistence import (
     AppendOnlyAuditWriter,
     NamespaceLock,
@@ -796,6 +803,7 @@ class WorkerRuntime:
             next_required_decision=context,
         )
         self._add_observation(observation)
+        record_decision_required(job, reason_code=reason_code)
         if step is not None:
             self._repository.save_step(
                 step.model_copy(update={"state": StepState.DECISION_REQUIRED})
@@ -815,6 +823,7 @@ class WorkerRuntime:
         try:
             lock = self._locks.acquire(job.target_namespace, job.job_id)
         except NamespaceLockUnavailable:
+            record_lock_contention(job)
             self._decision_required(
                 job,
                 reason_code="NAMESPACE_LOCK_UNAVAILABLE",
@@ -871,7 +880,25 @@ class WorkerRuntime:
         )
         self._save_job(self._with_progress(updated))
         self._repository.add_observation(result.observation)
-        AppendOnlyAuditWriter(self._repository).write(result.audit_event)
+        try:
+            AppendOnlyAuditWriter(self._repository).write(result.audit_event)
+        except Exception:
+            record_audit_failure(
+                action=result.audit_event.action,
+                job_id=job.job_id,
+                correlation_id=job.correlation_id,
+                trace_id=job.trace_id,
+            )
+            raise
+        log_event(
+            "worker_job_state_transition",
+            job_id=job.job_id,
+            target_namespace=job.target_namespace,
+            from_state=job.state.value,
+            to_state=target.value,
+            correlation_id=job.correlation_id,
+            trace_id=job.trace_id,
+        )
         return updated
 
     def _complete_phase_if_ready(self, phase: ExecutionPhase) -> None:
@@ -934,6 +961,7 @@ class WorkerRuntime:
 
     def _save_job(self, job: ExecutionJob) -> None:
         self._repository.save_job(job)
+        record_job_state(job)
 
     def _add_observation(self, observation: Observation) -> None:
         self._repository.add_observation(observation)

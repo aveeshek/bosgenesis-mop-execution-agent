@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import zipfile
 from pathlib import Path
@@ -58,6 +58,21 @@ def test_validation_executor_checks_k8s_helm_and_custom_plan_validations() -> No
         "plan_validation:validate-pods",
     }
 
+
+def test_validation_executor_evaluates_response_collections_for_unhealthy_resources() -> None:
+    job = ExecutionJob(job_id="job-1", bundle_id="bundle-1", target_namespace="agent-testing")
+
+    result = ValidationExecutor(
+        k8s_client=ResponseCollectionValidationK8sClient(),
+        helm_client=FakeValidationHelmClient(),
+    ).execute(job=job, steps=[])
+
+    checks = {check.name: check for check in result.checks}
+    assert result.success is False
+    assert checks["pods"].success is False
+    assert checks["pvcs"].success is False
+    assert "pending-pod" in checks["pods"].summary
+    assert "pending-data" in checks["pvcs"].summary
 
 def test_rollback_executor_requires_instruction_and_approval_then_reverts_namespace() -> None:
     job = ExecutionJob(job_id="job-1", bundle_id="bundle-1", target_namespace="agent-testing")
@@ -198,6 +213,26 @@ class FakeValidationK8sClient:
     def list_ingresses(self, namespace: str) -> McpCallResult:
         return _mcp_result("bosgenesis_k8s", "ingress.list", {"result": []})
 
+
+class ResponseCollectionValidationK8sClient(FakeValidationK8sClient):
+    def list_pods(self, namespace: str) -> McpCallResult:
+        return _mcp_result(
+            "bosgenesis_k8s",
+            "pod.list",
+            {
+                "response": [
+                    _pod("ready-pod"),
+                    {"name": "pending-pod", "phase": "Pending", "ready": "0/1"},
+                ]
+            },
+        )
+
+    def list_pvcs(self, namespace: str) -> McpCallResult:
+        return _mcp_result(
+            "bosgenesis_k8s",
+            "pvc.list",
+            {"response": [_pvc("bound-data"), {"name": "pending-data", "phase": "Pending"}]},
+        )
 
 class FakeValidationHelmClient:
     def list_releases(self, *, namespace: str, all_statuses: bool = True) -> McpCallResult:

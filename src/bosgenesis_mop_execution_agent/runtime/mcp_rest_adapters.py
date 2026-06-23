@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
@@ -14,6 +15,7 @@ from bosgenesis_mop_execution_agent.models import (
     ObservationSeverity,
     ObservationType,
 )
+from bosgenesis_mop_execution_agent.observability.metrics import record_mcp_call
 from bosgenesis_mop_execution_agent.security import redact_value
 
 
@@ -189,36 +191,45 @@ class KubernetesInspectorRestDryRunClient:
         server_name: str,
         tool_name: str,
     ) -> McpCallResult:
+        started = time.perf_counter()
         headers = {"X-API-Key": self._api_key} if self._api_key else {}
         try:
             with httpx.Client(timeout=self._timeout_seconds) as client:
                 response = client.get(f"{self._base_url}{path}", params=params, headers=headers)
         except httpx.TimeoutException:
-            return self._failure(
+            result = self._failure(
                 server_name,
                 tool_name,
                 ErrorCode.TIMEOUT_EXCEEDED,
                 f"mcp_timeout:{tool_name}",
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
         except httpx.HTTPError as exc:
-            return self._failure(
+            result = self._failure(
                 server_name,
                 tool_name,
                 ErrorCode.MCP_UNAVAILABLE,
                 f"mcp_unavailable:{tool_name}:{type(exc).__name__}",
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
         data = _response_data(response)
         if response.is_success:
-            return self._success(server_name, tool_name, data)
-        return self._failure(
+            result = self._success(server_name, tool_name, data)
+            _record_mcp_result(result, started)
+            return result
+        result = self._failure(
             server_name,
             tool_name,
             _error_code_from_response(response, data),
             _message_from_response(response, data),
             data=data,
         )
+        _record_mcp_result(result, started)
+        return result
 
     def _post(
         self,
@@ -228,37 +239,46 @@ class KubernetesInspectorRestDryRunClient:
         server_name: str,
         tool_name: str,
     ) -> McpCallResult:
+        started = time.perf_counter()
         headers = {"X-API-Key": self._api_key} if self._api_key else {}
         try:
             with httpx.Client(timeout=self._timeout_seconds) as client:
                 response = client.post(f"{self._base_url}{path}", json=payload, headers=headers)
         except httpx.TimeoutException:
-            return self._failure(
+            result = self._failure(
                 server_name,
                 tool_name,
                 ErrorCode.TIMEOUT_EXCEEDED,
                 f"mcp_timeout:{tool_name}",
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
         except httpx.HTTPError as exc:
-            return self._failure(
+            result = self._failure(
                 server_name,
                 tool_name,
                 ErrorCode.MCP_UNAVAILABLE,
                 f"mcp_unavailable:{tool_name}:{type(exc).__name__}",
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
 
         data = _response_data(response)
         if response.is_success:
-            return self._success(server_name, tool_name, data)
-        return self._failure(
+            result = self._success(server_name, tool_name, data)
+            _record_mcp_result(result, started)
+            return result
+        result = self._failure(
             server_name,
             tool_name,
             _error_code_from_response(response, data),
             _message_from_response(response, data),
             data=data,
         )
+        _record_mcp_result(result, started)
+        return result
 
     def _success(self, server_name: str, tool_name: str, data: dict[str, Any]) -> McpCallResult:
         observation = _observation(
@@ -513,12 +533,13 @@ class HelmManagerRestDryRunClient:
         return self._post("/repos/add", payload, "helm.repo_add")
 
     def _post(self, path: str, payload: dict[str, Any], tool_name: str) -> McpCallResult:
+        started = time.perf_counter()
         headers = {"X-API-Key": self._api_key} if self._api_key else {}
         try:
             with httpx.Client(timeout=self._timeout_seconds) as client:
                 response = client.post(f"{self._base_url}{path}", json=payload, headers=headers)
         except httpx.TimeoutException:
-            return _standalone_failure(
+            result = _standalone_failure(
                 self._job_id,
                 "bosgenesis_helm",
                 tool_name,
@@ -528,8 +549,10 @@ class HelmManagerRestDryRunClient:
                 self._trace_id,
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
         except httpx.HTTPError as exc:
-            return _standalone_failure(
+            result = _standalone_failure(
                 self._job_id,
                 "bosgenesis_helm",
                 tool_name,
@@ -539,10 +562,12 @@ class HelmManagerRestDryRunClient:
                 self._trace_id,
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
 
         data = _response_data(response)
         if response.is_success:
-            return _standalone_success(
+            result = _standalone_success(
                 self._job_id,
                 "bosgenesis_helm",
                 tool_name,
@@ -550,7 +575,9 @@ class HelmManagerRestDryRunClient:
                 self._correlation_id,
                 self._trace_id,
             )
-        return _standalone_failure(
+            _record_mcp_result(result, started)
+            return result
+        result = _standalone_failure(
             self._job_id,
             "bosgenesis_helm",
             tool_name,
@@ -560,6 +587,8 @@ class HelmManagerRestDryRunClient:
             self._trace_id,
             data=data,
         )
+        _record_mcp_result(result, started)
+        return result
 
     def _get(
         self,
@@ -567,12 +596,13 @@ class HelmManagerRestDryRunClient:
         params: dict[str, Any],
         tool_name: str,
     ) -> McpCallResult:
+        started = time.perf_counter()
         headers = {"X-API-Key": self._api_key} if self._api_key else {}
         try:
             with httpx.Client(timeout=self._timeout_seconds) as client:
                 response = client.get(f"{self._base_url}{path}", params=params, headers=headers)
         except httpx.TimeoutException:
-            return _standalone_failure(
+            result = _standalone_failure(
                 self._job_id,
                 "bosgenesis_helm",
                 tool_name,
@@ -582,8 +612,10 @@ class HelmManagerRestDryRunClient:
                 self._trace_id,
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
         except httpx.HTTPError as exc:
-            return _standalone_failure(
+            result = _standalone_failure(
                 self._job_id,
                 "bosgenesis_helm",
                 tool_name,
@@ -593,10 +625,12 @@ class HelmManagerRestDryRunClient:
                 self._trace_id,
                 retryable=True,
             )
+            _record_mcp_result(result, started)
+            return result
 
         data = _response_data(response)
         if response.is_success:
-            return _standalone_success(
+            result = _standalone_success(
                 self._job_id,
                 "bosgenesis_helm",
                 tool_name,
@@ -604,7 +638,9 @@ class HelmManagerRestDryRunClient:
                 self._correlation_id,
                 self._trace_id,
             )
-        return _standalone_failure(
+            _record_mcp_result(result, started)
+            return result
+        result = _standalone_failure(
             self._job_id,
             "bosgenesis_helm",
             tool_name,
@@ -614,6 +650,8 @@ class HelmManagerRestDryRunClient:
             self._trace_id,
             data=data,
         )
+        _record_mcp_result(result, started)
+        return result
 
 
 def _manifest_for_namespace(manifest: dict[str, Any], namespace: str) -> dict[str, Any]:
@@ -782,6 +820,19 @@ def _standalone_failure(
             correlation_id=correlation_id,
             trace_id=trace_id,
         ),
+    )
+
+
+def _record_mcp_result(result: McpCallResult, started: float) -> None:
+    record_mcp_call(
+        server_name=result.server_name,
+        tool_name=result.tool_name,
+        success=result.success,
+        duration_seconds=time.perf_counter() - started,
+        job_id=result.observation.job_id if result.observation else None,
+        correlation_id=result.correlation_id,
+        trace_id=result.trace_id,
+        error_code=result.error.error_code.value if result.error else None,
     )
 
 

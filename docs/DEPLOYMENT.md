@@ -38,6 +38,10 @@ Important values:
 - `config.memoryEnabled`: defaults to `true`; memory is execution context only.
 - `config.memoryPostgresEnabled`: defaults to `true`; durable memory records use PostgreSQL.
 - `config.postgresSchema`: defaults to `mop_execution`.
+- `config.logFormat`: defaults to `json` for structured logs.
+- `config.enableOtel`: enables OpenTelemetry traces to SigNoz.
+- `config.signozEndpoint`: OTLP gRPC endpoint used when tracing is enabled.
+- `config.metricsEnabled`: documents that `/metrics` is available on the API port.
 - `worker.enabled`: enables the async worker once Phase 7 is implemented.
 - `reconciler.enabled`: enables recovery once reconciler logic is implemented.
 - `rbac.allowDelete`: must remain `false` unless rollback/destructive flows are approved.

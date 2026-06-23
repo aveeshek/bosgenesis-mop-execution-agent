@@ -48,7 +48,10 @@ config:
   apiBackgroundWorkerEnabled: "true"
   apiWorkerIdleSleepSeconds: "0.25"
   enableOtel: "false"
+  otelServiceName: "bosgenesis-mop-execution-agent"
   signozEndpoint: "http://signoz-otel-collector.signoz.svc.cluster.local:4317"
+  otelExporterOtlpInsecure: "true"
+  metricsEnabled: "true"
   langfuseEnabled: "false"
   k8sInspectorMcpEndpoint: "http://bosgenesis-k8s-inspector-mcp.bosgenesis.svc.cluster.local:8080"
   helmManagerMcpEndpoint: "http://bosgenesis-helm-manager-mcp.bosgenesis.svc.cluster.local:8080"
@@ -107,6 +110,16 @@ api:
     limits:
       cpu: 500m
       memory: 512Mi
+  livenessProbe:
+    initialDelaySeconds: 20
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
 
 worker:
   enabled: false
