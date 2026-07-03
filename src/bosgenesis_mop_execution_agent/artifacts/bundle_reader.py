@@ -7,6 +7,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from bosgenesis_mop_execution_agent.artifacts.models import BundleSource, BundleSourceType
 
@@ -39,7 +41,9 @@ def resolve_bundle_source(source: BundleSource) -> Path:
         if not path.exists() or not path.is_dir():
             raise BundleSourceResolutionError(f"artifact_manifest_root_missing:{root}")
         return path
-    if source.type in {BundleSourceType.MOP_CREATION_RUN, BundleSourceType.OBJECT_STORE}:
+    if source.type == BundleSourceType.OBJECT_STORE:
+        return _resolve_object_store(source.value)
+    if source.type == BundleSourceType.MOP_CREATION_RUN:
         msg = f"bundle_source_not_locally_resolvable:{source.type.value}"
         raise BundleSourceResolutionError(msg)
     raise BundleSourceResolutionError(f"unsupported_bundle_source:{source.type.value}")
@@ -70,3 +74,39 @@ def _extract_zip_safely(archive: Path) -> Path:
             with zip_file.open(member) as source, destination.open("wb") as output:
                 output.write(source.read())
     return target
+
+
+def _resolve_object_store(value: str) -> Path:
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"}:
+        return _download_zip_safely(value)
+    archive = Path(value)
+    if archive.exists() and archive.is_file():
+        return _extract_zip_safely(archive)
+    raise BundleSourceResolutionError(f"bundle_source_not_locally_resolvable:object_store:{value}")
+
+
+def _download_zip_safely(url: str) -> Path:
+    temp_dir = Path(tempfile.mkdtemp(prefix="mop-exec-object-store-"))
+    archive = temp_dir / "mop-bundle.zip"
+    max_bytes = 100 * 1024 * 1024
+    request = Request(url, headers={"User-Agent": "bosgenesis-mop-execution-agent/0.1"})
+    try:
+        with urlopen(request, timeout=60) as response, archive.open("wb") as output:
+            size_header = response.headers.get("Content-Length")
+            if size_header and int(size_header) > max_bytes:
+                raise BundleSourceResolutionError(f"object_store_bundle_too_large:{size_header}")
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise BundleSourceResolutionError(f"object_store_bundle_too_large:{total}")
+                output.write(chunk)
+    except BundleSourceResolutionError:
+        raise
+    except Exception as exc:
+        raise BundleSourceResolutionError(f"object_store_download_failed:{url}:{exc}") from exc
+    return _extract_zip_safely(archive)

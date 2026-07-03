@@ -60,6 +60,21 @@ def test_uploaded_zip_source_resolves_and_validates(tmp_path: Path) -> None:
     assert bundle.machine_plan.phase_ids == {"apply_configmaps"}
 
 
+def test_object_store_zip_source_resolves_and_validates(tmp_path: Path) -> None:
+    bundle_root = _copy_sample_bundle(tmp_path)
+    archive = tmp_path / "object-store-bundle.zip"
+    with zipfile.ZipFile(archive, mode="w") as zip_file:
+        for path in bundle_root.rglob("*"):
+            if path.is_file():
+                zip_file.write(path, path.relative_to(bundle_root))
+
+    bundle = load_and_validate_bundle(
+        BundleSource(type=BundleSourceType.OBJECT_STORE, value=str(archive)),
+        target_namespace="sample-target",
+    )
+
+    assert bundle.machine_plan.phase_ids == {"apply_configmaps"}
+
 def test_artifact_manifest_source_resolves(tmp_path: Path) -> None:
     bundle_root = _copy_sample_bundle(tmp_path)
     manifest = tmp_path / "artifact-manifest.json"
