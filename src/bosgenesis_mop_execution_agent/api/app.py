@@ -12,6 +12,8 @@ from bosgenesis_mop_execution_agent.api.routes import router as api_router
 from bosgenesis_mop_execution_agent.api.schemas import HealthResponse
 from bosgenesis_mop_execution_agent.api.service import MopExecutionApiService
 from bosgenesis_mop_execution_agent.mcp_server.routes import router as mcp_router
+from bosgenesis_mop_execution_agent.namespace_twin import NamespaceTwinService
+from bosgenesis_mop_execution_agent.namespace_twin.routes import router as namespace_twin_router
 from bosgenesis_mop_execution_agent.observability import (
     METRICS,
     configure_logging,
@@ -32,6 +34,7 @@ def create_app() -> FastAPI:
     app.state.otel = configure_tracing(app)
     mop_execution_service = MopExecutionApiService()
     app.state.mop_execution_service = mop_execution_service
+    app.state.namespace_twin_service = NamespaceTwinService()
 
     @app.get("/healthz", response_model=HealthResponse, tags=["Health"])
     async def get_health() -> HealthResponse:
@@ -52,6 +55,7 @@ def create_app() -> FastAPI:
         return Response(METRICS.render_prometheus(), media_type="text/plain; version=0.0.4")
 
     app.include_router(api_router)
+    app.include_router(namespace_twin_router)
     app.include_router(mcp_router)
 
     return app
