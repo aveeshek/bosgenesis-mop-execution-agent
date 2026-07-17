@@ -26,6 +26,15 @@ class NamespaceTwinCreateRequest(BaseModel):
     supersedes_twin_id: str | None = Field(default=None, max_length=200)
 
 
+class NamespaceTwinDryRunEvidenceRequest(BaseModel):
+    dry_run_job_id: str = Field(min_length=1, max_length=200)
+    bundle_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    input_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    command_fingerprint_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    wait_seconds: int = Field(default=0, ge=0, le=30)
+    poll_interval_ms: int = Field(default=500, ge=100, le=5000)
+
+
 def get_namespace_twin_service(request: Request) -> NamespaceTwinService:
     return cast("NamespaceTwinService", request.app.state.namespace_twin_service)
 
@@ -240,6 +249,51 @@ async def get_namespace_twin_policy(
     except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
         return _error(exc)
 
+
+@router.post("/{twin_id}/dry-run-evidence")
+async def attach_namespace_twin_dry_run_evidence(
+    twin_id: str,
+    payload: NamespaceTwinDryRunEvidenceRequest,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+) -> JSONResponse:
+    try:
+        return _success(
+            service.attach_dry_run_evidence(
+                twin_id,
+                payload.model_dump(mode="json", exclude_none=True),
+            ),
+            "Authoritative dry-run evidence attached and decision calculated.",
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.get("/{twin_id}/dry-run")
+async def get_namespace_twin_dry_run(
+    twin_id: str,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+    phase: str | None = Query(default=None),
+    step: str | None = Query(default=None),
+    resource: str | None = Query(default=None),
+    tool: str | None = Query(default=None),
+    outcome: str | None = Query(default=None),
+) -> JSONResponse:
+    try:
+        return _success(
+            service.dry_run(
+                twin_id,
+                phase=phase,
+                step=step,
+                resource=resource,
+                tool=tool,
+                outcome=outcome,
+            ),
+            "Authoritative dry-run and structured diff facts returned.",
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
 
 @router.get("/{twin_id}/actions")
 async def get_namespace_twin_actions(

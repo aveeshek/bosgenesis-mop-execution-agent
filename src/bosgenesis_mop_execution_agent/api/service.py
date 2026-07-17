@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import tempfile
 import threading
@@ -255,6 +257,15 @@ class MopExecutionApiService:
             trace_id=payload.get("trace_id"),
             source_namespace=payload.get("source_namespace"),
             execution_mode=_execution_mode(payload.get("execution_mode")),
+            links={
+                key: str(value)
+                for key, value in {
+                    "namespace_twin_input_hash": payload.get("namespace_twin_input_hash"),
+                    "bundle_hash": payload.get("bundle_hash"),
+                    "snapshot_hash": payload.get("snapshot_hash"),
+                }.items()
+                if value
+            },
         )
         self._save_job(job)
         plan_payload = payload.get("plan") or {}
@@ -762,6 +773,225 @@ class MopExecutionApiService:
             return self._not_found("Job not found.", job_id=job_id)
         return self._ok("Plan returned.", data={"plan": self._plans.get(job_id, {})}, job_id=job_id)
 
+    def namespace_twin_dry_run_evidence(self, job_id: str) -> dict[str, Any]:
+        """Return the authoritative, redacted dry-run envelope for twin attachment."""
+        job = self._get_job(job_id)
+        if job is None:
+            return self._not_found("Job not found.", job_id=job_id)
+        steps = sorted(
+            self._repository.get_steps(job_id),
+            key=lambda item: (item.sequence_index, item.step_id),
+        )
+        observations = sorted(
+            self._repository.get_observations(job_id),
+            key=lambda item: (item.timestamp, item.observation_id),
+        )
+        reports = sorted(
+            self._repository.get_reports(job_id),
+            key=lambda item: (item.created_at, item.report_id),
+        )
+        failed_steps = [
+            step.step_id
+            for step in steps
+            if str(step.dry_run_status or step.state) == "dry_run_failed"
+        ]
+        fingerprints = sorted(
+            {step.command_fingerprint for step in steps if step.command_fingerprint}
+        )
+        fingerprint_hash = (
+            hashlib.sha256(
+                json.dumps(fingerprints, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if fingerprints
+            else None
+        )
+        terminal_failure = job.state in {
+            JobState.INVALID_BUNDLE,
+            JobState.FAILED,
+            JobState.CANCELLED,
+        }
+        has_dry_run_steps = any(
+            step.commands or step.command_fingerprint or step.dry_run_status is not None
+            for step in steps
+        )
+        partial_steps = [
+            step.step_id
+            for step in steps
+            if (step.commands or step.command_fingerprint)
+            and str(step.dry_run_status or "") != "dry_run_succeeded"
+        ]
+        if terminal_failure or failed_steps:
+            status = "failed"
+        elif job.dry_run_satisfied and has_dry_run_steps and fingerprints and not partial_steps:
+            status = "passed"
+        elif job.state == JobState.DRY_RUNNING:
+            status = "running"
+        elif job.dry_run_satisfied or has_dry_run_steps:
+            status = "partial"
+        else:
+            status = "pending"
+
+        def step_validation(step_types: set[str], label: str) -> dict[str, Any]:
+            matching = [step for step in steps if step.type.value in step_types]
+            if not matching:
+                return {
+                    "type": label,
+                    "status": "not_available",
+                    "summary": "No matching step was present.",
+                }
+            if any(str(step.dry_run_status or step.state) == "dry_run_failed" for step in matching):
+                return {
+                    "type": label,
+                    "status": "failed",
+                    "summary": "One or more authoritative dry-run steps were rejected.",
+                }
+            if all(str(step.dry_run_status or "") == "dry_run_succeeded" for step in matching):
+                return {
+                    "type": label,
+                    "status": "passed",
+                    "summary": "All matching authoritative dry-run steps were accepted.",
+                }
+            return {
+                "type": label,
+                "status": "warning",
+                "summary": "Matching steps produced incomplete authoritative evidence.",
+            }
+
+        normalized_observations = []
+        for observation in observations:
+            severity = observation.severity.value
+            result_status = str((observation.result or {}).get("status") or "").lower()
+            if severity in {"error", "critical"} or result_status in {
+                "failed",
+                "rejected",
+                "error",
+            }:
+                outcome = "rejected"
+            elif severity == "warning":
+                outcome = "warning"
+            elif result_status in {"skipped", "not_applicable"}:
+                outcome = "skipped"
+            else:
+                outcome = "accepted"
+            resource = observation.resource_refs[0] if observation.resource_refs else None
+            resource_identity = None
+            if resource:
+                resource_identity = "/".join(
+                    value
+                    for value in (
+                        resource.namespace,
+                        resource.kind,
+                        resource.name or resource.helm_release_name,
+                    )
+                    if value
+                )
+            normalized_observations.append(
+                {
+                    "observation_id": observation.observation_id,
+                    "phase": observation.phase_id or "unassigned",
+                    "step": observation.step_id or "unassigned",
+                    "tool": observation.mcp_tool
+                    or observation.mcp_server
+                    or observation.observation_type.value,
+                    "outcome": outcome,
+                    "summary": str(redact_value(observation.summary)),
+                    "resource_identity": resource_identity,
+                    "evidence_refs": [
+                        {
+                            "evidence_id": observation.observation_id,
+                            "source_type": "dry_run",
+                            "source_id": observation.observation_id,
+                            "summary": str(redact_value(observation.summary)),
+                            "captured_at": observation.timestamp.isoformat(),
+                            "redacted": True,
+                            "href": None,
+                        }
+                    ],
+                    "redacted": True,
+                }
+            )
+        report_metadata = [
+            {
+                "artifact_id": report.report_id,
+                "filename": Path(report.path).name,
+                "media_type": (
+                    "application/pdf"
+                    if Path(report.path).suffix.lower() == ".pdf"
+                    else "text/html"
+                    if Path(report.path).suffix.lower() in {".html", ".htm"}
+                    else "application/json"
+                ),
+                "download_href": report.download_url
+                or f"/v1/execution-jobs/{job_id}/reports/{report.report_id}",
+                "sha256": None,
+            }
+            for report in reports
+        ]
+        evidence = {
+            "dry_run_job_id": job.job_id,
+            "status": status,
+            "authoritative": True,
+            "bundle_id": job.bundle_id,
+            "bundle_hash": job.links.get("bundle_hash"),
+            "input_hash": job.links.get("namespace_twin_input_hash"),
+            "target_namespace": job.target_namespace,
+            "source_namespace": job.source_namespace,
+            "job_state": job.state.value,
+            "execution_mode": job.execution_mode.value,
+            "dry_run_satisfied": job.dry_run_satisfied,
+            "created_at": job.created_at.isoformat(),
+            "updated_at": job.updated_at.isoformat(),
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "command_fingerprints": fingerprints,
+            "command_fingerprint_hash": fingerprint_hash,
+            "failed_steps": failed_steps,
+            "partial_steps": partial_steps,
+            "validations": [
+                {
+                    "type": "bundle_schema",
+                    "status": "passed" if job.bundle_id != "unregistered" else "failed",
+                    "summary": (
+                        "The execution job references a registered, validated artifact bundle."
+                        if job.bundle_id != "unregistered"
+                        else "The execution job does not reference a registered bundle."
+                    ),
+                },
+                step_validation({"helm_validate"}, "helm_lint"),
+                step_validation({"helm_install", "helm_upgrade"}, "helm_dry_run"),
+                step_validation(
+                    {"k8s_validate", "k8s_apply", "k8s_delete"},
+                    "kubernetes_server_dry_run",
+                ),
+            ],
+            "observations": normalized_observations,
+            "reports": report_metadata,
+            "evidence_refs": [
+                f"job:{job_id}",
+                *[
+                    f"job:{job_id}:observation:{item['observation_id']}"
+                    for item in normalized_observations
+                ],
+                *[
+                    f"job:{job_id}:report:{item['artifact_id']}"
+                    for item in report_metadata
+                ],
+            ],
+            "fidelity_limitations": [
+                "Server-side dry-run cannot prove scheduling or controller convergence.",
+                (
+                    "Image pulls, storage binding, probes, traffic, and application health "
+                    "require runtime validation."
+                ),
+                "External DNS and dependencies are outside authoritative dry-run evidence.",
+            ],
+            "redacted": True,
+        }
+        return self._ok(
+            "Authoritative dry-run evidence returned.",
+            data={"dry_run_evidence": redact_value(evidence)},
+            job_id=job_id,
+            state=job.state,
+        )
     def list_observations(self, job_id: str) -> dict[str, Any]:
         if self._get_job(job_id) is None:
             return self._not_found("Job not found.", job_id=job_id)

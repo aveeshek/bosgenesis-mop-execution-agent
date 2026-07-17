@@ -52,7 +52,10 @@ def test_dry_run_only_e2e_uses_kubernetes_server_side_dry_run_sample_bundle(
     assert stored is not None
     assert stored.state == JobState.COMPLETED
     assert stored.execution_mode == ExecutionMode.DRY_RUN_ONLY
-    assert repo.get_steps(job.job_id)[0].state == StepState.DRY_RUN_SUCCEEDED
+    stored_step = repo.get_steps(job.job_id)[0]
+    assert stored_step.state == StepState.DRY_RUN_SUCCEEDED
+    assert stored_step.command_fingerprint is not None
+    assert stored_step.command_fingerprint.startswith("sha256:")
     dry_run_observations = [
         observation
         for observation in repo.get_observations(job.job_id)
@@ -63,6 +66,8 @@ def test_dry_run_only_e2e_uses_kubernetes_server_side_dry_run_sample_bundle(
     assert dry_run_observations[-1].result["outputs"][0]["tool"] == (
         "manifest.server_side_dry_run_apply"
     )
+    assert dry_run_observations[-1].mcp_server == "k8s"
+    assert dry_run_observations[-1].mcp_tool == "manifest.server_side_dry_run_apply"
     assert "plain-secret-value" not in str(dry_run_observations[-1].result)
 
 

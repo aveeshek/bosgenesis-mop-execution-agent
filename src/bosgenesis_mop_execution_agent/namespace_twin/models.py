@@ -26,6 +26,7 @@ ACTIVE_STATES = {
     "requested",
     "generating",
     "awaiting_dry_run",
+    "dry_run_evidence_attached",
     "decision_calculating",
 }
 TERMINAL_STATES = {
@@ -41,6 +42,14 @@ ALLOWED_TRANSITIONS = {
     "requested": {"generating", "failed", "cancelled", "superseded", "expired"},
     "generating": {"awaiting_dry_run", "failed", "cancelled", "superseded", "expired"},
     "awaiting_dry_run": {
+        "dry_run_evidence_attached",
+        "decision_calculating",
+        "failed",
+        "cancelled",
+        "superseded",
+        "expired",
+    },
+    "dry_run_evidence_attached": {
         "decision_calculating",
         "failed",
         "cancelled",

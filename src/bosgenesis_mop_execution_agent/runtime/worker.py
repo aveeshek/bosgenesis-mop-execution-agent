@@ -39,6 +39,7 @@ from bosgenesis_mop_execution_agent.persistence import (
 )
 from bosgenesis_mop_execution_agent.persistence.repositories import JsonExecutionRepository
 from bosgenesis_mop_execution_agent.plans.models import MachineExecutionPlan
+from bosgenesis_mop_execution_agent.policy import command_fingerprint
 from bosgenesis_mop_execution_agent.runtime.decision_context import DecisionContextBuilder
 from bosgenesis_mop_execution_agent.runtime.dry_run import DryRunExecutor
 from bosgenesis_mop_execution_agent.runtime.instructions import InstructionDecision, InstructionGate
@@ -359,20 +360,44 @@ class WorkerRuntime:
                 step=step,
             )
 
-        now = utc_now()
-        self._repository.save_step(
-            step.model_copy(
-                update={
-                    "state": StepState.DRY_RUN_RUNNING,
-                    "dry_run_status": StepState.DRY_RUN_RUNNING,
-                    "started_at": step.started_at or now,
-                    "attempt_number": step.attempt_number + 1,
-                }
-            )
+        dry_run_command = next(
+            (
+                str(item.get("command"))
+                for item in step.commands
+                if item.get("dry_run") is True and item.get("command")
+            ),
+            f"{step.type.value}:{step.step_id}",
         )
-        result = dry_runs.execute(job=job, step=step)
+        fingerprint = command_fingerprint(
+            dry_run_command,
+            {
+                "target_namespace": job.target_namespace,
+                "phase_id": phase.phase_id,
+                "step_id": step.step_id,
+                "manifest_refs": sorted(step.manifest_refs),
+                "values_refs": sorted(step.values_refs),
+            },
+        )
+        now = utc_now()
+        running_step = step.model_copy(
+            update={
+                "state": StepState.DRY_RUN_RUNNING,
+                "dry_run_status": StepState.DRY_RUN_RUNNING,
+                "command_fingerprint": fingerprint,
+                "started_at": step.started_at or now,
+                "attempt_number": step.attempt_number + 1,
+            }
+        )
+        self._repository.save_step(running_step)
+        result = dry_runs.execute(job=job, step=running_step)
+        primary_output = next(
+            (item for item in result.outputs if isinstance(item, dict)),
+            {},
+        )
+        mcp_server = str(primary_output.get("server") or "") or None
+        mcp_tool = str(primary_output.get("tool") or "") or None
         if not result.success:
-            failed_step = step.model_copy(
+            failed_step = running_step.model_copy(
                 update={
                     "state": StepState.DRY_RUN_FAILED,
                     "dry_run_status": StepState.DRY_RUN_FAILED,
@@ -389,6 +414,8 @@ class WorkerRuntime:
                     summary=result.message or f"Dry-run failed for step {step.step_id}.",
                     phase_id=phase.phase_id,
                     step_id=step.step_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
                     result={
                         "action": result.action,
                         "error_code": result.error_code.value if result.error_code else None,
@@ -404,7 +431,7 @@ class WorkerRuntime:
                 step=failed_step,
             )
 
-        completed_step = step.model_copy(
+        completed_step = running_step.model_copy(
             update={
                 "state": StepState.DRY_RUN_SUCCEEDED,
                 "dry_run_status": StepState.DRY_RUN_SUCCEEDED,
@@ -420,6 +447,8 @@ class WorkerRuntime:
                 summary=f"Dry-run succeeded for step {step.step_id}.",
                 phase_id=phase.phase_id,
                 step_id=step.step_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
                 result={
                     "action": result.action,
                     "outputs": result.outputs,

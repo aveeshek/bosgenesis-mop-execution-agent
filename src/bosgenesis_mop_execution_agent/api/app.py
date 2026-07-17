@@ -34,7 +34,7 @@ def create_app() -> FastAPI:
     app.state.otel = configure_tracing(app)
     mop_execution_service = MopExecutionApiService()
     app.state.mop_execution_service = mop_execution_service
-    app.state.namespace_twin_service = NamespaceTwinService()
+    app.state.namespace_twin_service = NamespaceTwinService(execution_service=mop_execution_service)
 
     @app.get("/healthz", response_model=HealthResponse, tags=["Health"])
     async def get_health() -> HealthResponse:

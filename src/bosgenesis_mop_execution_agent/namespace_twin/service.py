@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -65,9 +67,11 @@ class NamespaceTwinService:
         self,
         repository: NamespaceTwinRepository | None = None,
         live_collector: LiveSnapshotCollector | None = None,
+        execution_service: Any | None = None,
     ) -> None:
         self.repository = repository or NamespaceTwinRepository()
         self.live_collector = live_collector or KubernetesLiveSnapshotCollector.from_environment()
+        self.execution_service = execution_service
         self.recovered_twin_ids = self.repository.recover_non_terminal()
 
     def create(self, payload: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
@@ -141,6 +145,13 @@ class NamespaceTwinService:
             ) from exc
 
         now = datetime.now(UTC)
+        snapshot_canonical = json.dumps(
+            snapshot.resources,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        snapshot_hash = hashlib.sha256(snapshot_canonical.encode("utf-8")).hexdigest()
         twin_id = f"twin_{uuid4().hex}"
         bundle_name = self._bundle_name(source)
         display_source = source_namespace or Path(bundle_name).stem or "bundle"
@@ -165,6 +176,9 @@ class NamespaceTwinService:
                 "release_delta_summary": self._delta_summary(deltas),
                 "live_snapshot": {
                     "available": snapshot.available,
+                    "snapshot_id": f"snapshot_{snapshot_hash[:24]}",
+                    "captured_at": now.isoformat(),
+                    "hash": snapshot_hash,
                     "complete_kinds": sorted(snapshot.complete_kinds),
                     "resource_count": len(snapshot.resources),
                     "evidence_refs": snapshot.evidence_refs,
@@ -174,7 +188,7 @@ class NamespaceTwinService:
                 "release-delta": "real_core",
                 "dependency-graph": "real_core",
                 "policy": "real_core",
-                "dry-run": "mock_non_authoritative",
+                "dry-run": "real_core",
                 "rollback": "mock_non_authoritative",
                 "drift": "mock_non_authoritative",
                 "runtime-behavior": "mock_non_authoritative",
@@ -262,6 +276,342 @@ class NamespaceTwinService:
             self.repository.supersede(supersedes_twin_id, superseded_by=twin_id)
         return self._project(run)
 
+    def attach_dry_run_evidence(
+        self,
+        twin_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attach one existing authoritative dry-run and finalize deterministically."""
+        core = self.repository.get_run(twin_id)
+        facts = dict(core.get("facts") or {})
+        job_id = str(payload.get("dry_run_job_id") or "").strip()
+        if not job_id:
+            raise NamespaceTwinError(
+                "dry_run_job_id_required",
+                "dry_run_job_id is required to attach authoritative evidence.",
+            )
+        existing = facts.get("dry_run_evidence") or {}
+        if core.get("decision_is_final"):
+            if existing.get("dry_run_job_id") == job_id:
+                return {
+                    "twin": self._project(core),
+                    "dry_run": self.dry_run(twin_id),
+                    "idempotent_replay": True,
+                }
+            raise NamespaceTwinError(
+                "terminal_twin_immutable",
+                "A different dry-run cannot modify a terminal namespace twin.",
+                status_code=409,
+            )
+        if core.get("lifecycle_status") in {"superseded", "expired", "cancelled", "failed"}:
+            raise NamespaceTwinError(
+                "twin_not_attachable",
+                "Authoritative evidence cannot be attached to this twin lifecycle state.",
+                status_code=409,
+                details={"lifecycle_status": core.get("lifecycle_status")},
+            )
+        if self.execution_service is None:
+            raise NamespaceTwinError(
+                "execution_service_unavailable",
+                "The shared MoP Execution service is unavailable.",
+                status_code=503,
+            )
+        wait_seconds = max(0, min(int(payload.get("wait_seconds") or 0), 30))
+        poll_interval_seconds = max(
+            0.1,
+            min(float(payload.get("poll_interval_ms") or 500) / 1000.0, 5.0),
+        )
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            response = self.execution_service.namespace_twin_dry_run_evidence(job_id)
+            if not response.get("ok"):
+                raise NamespaceTwinError(
+                    "dry_run_job_not_found",
+                    "The requested authoritative dry-run job was not found.",
+                    status_code=404,
+                    details={"dry_run_job_id": job_id},
+                )
+            evidence = dict((response.get("data") or {}).get("dry_run_evidence") or {})
+            polled_status = str(evidence.get("status") or "pending")
+            if polled_status not in {"pending", "running"} or time.monotonic() >= deadline:
+                break
+            time.sleep(poll_interval_seconds)
+        mismatches: list[str] = []
+        for key, expected, observed in (
+            ("target_namespace", core.get("target_namespace"), evidence.get("target_namespace")),
+            ("bundle_hash", core.get("bundle_hash"), evidence.get("bundle_hash")),
+            ("input_hash", core.get("input_hash"), evidence.get("input_hash")),
+        ):
+            if not observed or str(observed) != str(expected):
+                mismatches.append(
+                    f"{key}: expected {expected or 'missing'}, observed {observed or 'missing'}"
+                )
+        for key in ("bundle_hash", "input_hash", "command_fingerprint_hash"):
+            supplied = str(payload.get(key) or "").strip()
+            observed = str(evidence.get(key) or "").strip()
+            expected = (
+                str(core.get(key) or "").strip()
+                if key != "command_fingerprint_hash"
+                else observed
+            )
+            if supplied and supplied != expected:
+                mismatches.append(
+                    f"request {key}: expected {expected or 'missing'}, observed {supplied}"
+                )
+        if mismatches:
+            raise NamespaceTwinError(
+                "dry_run_evidence_mismatch",
+                "The dry-run evidence does not match this twin input boundary.",
+                status_code=409,
+                details={"mismatches": mismatches, "dry_run_job_id": job_id},
+            )
+
+        evidence_time = self._parse_timestamp(
+            evidence.get("completed_at") or evidence.get("updated_at")
+        )
+        max_age = max(
+            60,
+            int(os.getenv("NAMESPACE_TWIN_DRY_RUN_MAX_AGE_SECONDS", "86400")),
+        )
+        age_seconds = int((datetime.now(UTC) - evidence_time).total_seconds())
+        if age_seconds < 0 or age_seconds > max_age:
+            raise NamespaceTwinError(
+                "stale_dry_run_evidence",
+                "The dry-run evidence is outside the configured freshness window.",
+                status_code=409,
+                details={
+                    "age_seconds": age_seconds,
+                    "maximum_age_seconds": max_age,
+                    "dry_run_job_id": job_id,
+                },
+            )
+        evidence_status = str(evidence.get("status") or "pending")
+        if evidence_status in {"pending", "running"}:
+            raise NamespaceTwinError(
+                "dry_run_not_terminal",
+                "Only terminal authoritative dry-run evidence can be attached.",
+                status_code=409,
+                details={"status": evidence_status, "dry_run_job_id": job_id},
+            )
+        if evidence_status == "passed" and not evidence.get("command_fingerprint_hash"):
+            evidence_status = "partial"
+            evidence["status"] = "partial"
+            evidence.setdefault("partial_steps", []).append("command_fingerprint_hash_missing")
+
+        module_modes = dict(facts.get("module_modes") or {})
+        module_modes["dry-run"] = "real_core"
+        attached_facts = {
+            "module_modes": module_modes,
+            "dry_run_job_id": job_id,
+            "dry_run_status": evidence_status,
+            "dry_run_evidence": redact_value(evidence),
+            "command_fingerprint_hash": evidence.get("command_fingerprint_hash"),
+            "dry_run_attached_at": datetime.now(UTC).isoformat(),
+        }
+        updated = self.repository.merge_facts(
+            twin_id,
+            attached_facts,
+            event_type="dry_run_evidence_verified",
+            message="Authoritative dry-run evidence identity and freshness were verified.",
+            event_payload={
+                "dry_run_job_id": job_id,
+                "status": evidence_status,
+                "command_fingerprint_hash": evidence.get("command_fingerprint_hash"),
+                "age_seconds": age_seconds,
+            },
+        )
+        self.repository.transition(
+            twin_id,
+            "dry_run_evidence_attached",
+            message="Authoritative dry-run evidence attached to the namespace twin.",
+            payload={
+                "dry_run_job_id": job_id,
+                "status": evidence_status,
+                "qualifies": evidence_status == "passed",
+            },
+        )
+        self.repository.transition(
+            twin_id,
+            "decision_calculating",
+            message="Deterministic decision axes are being combined with dry-run evidence.",
+            payload={"model_authority": False},
+        )
+        merged_facts = dict(updated.get("facts") or {})
+        merged_facts.update(attached_facts)
+        policy_projection = (
+            (merged_facts.get("policy_twin") or {}).get("decision_projection") or {}
+        )
+        projected_decision = str(policy_projection.get("level") or "amber")
+        if projected_decision not in {"green", "amber", "red"}:
+            projected_decision = "amber"
+        decision = "red" if evidence_status != "passed" else projected_decision
+        decision_facts = {
+            **merged_facts,
+            "dry_run_qualification": {
+                "status": evidence_status,
+                "qualifies": evidence_status == "passed",
+                "failed_steps": list(evidence.get("failed_steps") or []),
+                "partial_steps": list(evidence.get("partial_steps") or []),
+                "precedence": (
+                    "authoritative_dry_run_failed_or_partial"
+                    if evidence_status != "passed"
+                    else policy_projection.get("precedence_rule")
+                ),
+            },
+            "decision_authority": "deterministic_policy_and_authoritative_dry_run",
+            "provisional": False,
+        }
+        canonical = json.dumps(
+            decision_facts,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        report_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        final = self.repository.persist_terminal_decision(
+            twin_id,
+            decision=decision,
+            report_hash=report_hash,
+            facts=decision_facts,
+        )
+        return {
+            "twin": self._project(final),
+            "dry_run": self.dry_run(twin_id),
+            "idempotent_replay": False,
+        }
+
+    def dry_run(
+        self,
+        twin_id: str,
+        *,
+        phase: str | None = None,
+        step: str | None = None,
+        resource: str | None = None,
+        tool: str | None = None,
+        outcome: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the persisted authoritative dry-run and structured diff projection."""
+        core = self.repository.get_run(twin_id)
+        facts = core.get("facts") or {}
+        evidence = dict(facts.get("dry_run_evidence") or {})
+        if not evidence:
+            return {
+                "schema_version": core["schema_version"],
+                "twin_id": twin_id,
+                "decision_version": core["decision_version"],
+                "lifecycle_status": core["lifecycle_status"],
+                "freshness": self._freshness(core),
+                "availability": self._availability(
+                    "not_run", "Authoritative dry-run evidence has not been attached."
+                ),
+                "data": None,
+            }
+        observations = list(evidence.get("observations") or [])
+        filters = {
+            "phase": phase,
+            "step": step,
+            "resource": resource,
+            "tool": tool,
+            "outcome": outcome,
+        }
+        for key, value in filters.items():
+            if not value:
+                continue
+            needle = str(value).lower()
+            field = "resource_identity" if key == "resource" else key
+            observations = [
+                item
+                for item in observations
+                if needle in str(item.get(field) or "").lower()
+            ]
+        deltas, delta_total, delta_summary = self.repository.list_release_deltas(
+            twin_id,
+            limit=500,
+            offset=0,
+        )
+        if resource:
+            needle = str(resource).lower()
+            deltas = [
+                item
+                for item in deltas
+                if needle
+                in " ".join(
+                    [
+                        str(item.get("resource_identity") or ""),
+                        str(item.get("kind") or ""),
+                        str(item.get("name") or ""),
+                    ]
+                ).lower()
+            ]
+        snapshot = dict((facts.get("module_modes") or {}).get("live_snapshot") or {})
+        evidence_status = str(evidence.get("status") or "failed")
+        tab_status = {
+            "passed": "passed",
+            "partial": "failed",
+            "failed": "failed",
+        }.get(evidence_status, evidence_status)
+        return {
+            "schema_version": core["schema_version"],
+            "twin_id": twin_id,
+            "decision_version": core["decision_version"],
+            "lifecycle_status": core["lifecycle_status"],
+            "freshness": self._freshness(core),
+            "availability": self._availability(
+                "available", "Authoritative dry-run and structured diff evidence is available."
+            ),
+            "data": {
+                "dry_run_job_id": evidence["dry_run_job_id"],
+                "status": tab_status,
+                "qualification_status": evidence_status,
+                "authoritative": True,
+                "bundle_hash": core["bundle_hash"],
+                "input_hash": core["input_hash"],
+                "target_namespace": core["target_namespace"],
+                "snapshot": {
+                    "snapshot_id": snapshot.get("snapshot_id")
+                    or f"snapshot_{str(snapshot.get('hash') or '')[:24]}",
+                    "captured_at": snapshot.get("captured_at"),
+                    "hash": snapshot.get("hash"),
+                },
+                "command_fingerprint_hash": evidence.get("command_fingerprint_hash"),
+                "command_fingerprints": list(evidence.get("command_fingerprints") or []),
+                "validations": list(evidence.get("validations") or []),
+                "observations": observations,
+                "observation_counts": {
+                    key: sum(item.get("outcome") == key for item in observations)
+                    for key in ("accepted", "rejected", "warning", "skipped", "unknown")
+                },
+                "structured_diff": {
+                    "rows": deltas,
+                    "result_count": len(deltas),
+                    "unfiltered_result_count": delta_total,
+                    "summary": delta_summary,
+                },
+                "evidence_refs": list(evidence.get("evidence_refs") or []),
+                "fidelity_limitations": list(evidence.get("fidelity_limitations") or []),
+                "artifacts": list(evidence.get("reports") or []),
+                "failed_steps": list(evidence.get("failed_steps") or []),
+                "partial_steps": list(evidence.get("partial_steps") or []),
+                "applied_filters": {key: value for key, value in filters.items() if value},
+                "model_authority": False,
+                "automatic_instruction_submission": False,
+                "automatic_mutation_retry": False,
+            },
+        }
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise NamespaceTwinError(
+                "invalid_dry_run_timestamp",
+                "Authoritative dry-run evidence has no valid completion timestamp.",
+                status_code=409,
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
     def _get_phase4(self, twin_id: str) -> dict[str, Any]:
         return self.repository.get_run(twin_id)
 
@@ -948,7 +1298,12 @@ class NamespaceTwinService:
                     ),
                 ),
                 "dry-run": self._availability(
-                    "not_run", "Authoritative dry-run evidence is not attached to this slice."
+                    "available" if facts.get("dry_run_evidence") else "not_run",
+                    (
+                        "Authoritative dry-run and diff evidence is attached."
+                        if facts.get("dry_run_evidence")
+                        else "Authoritative dry-run evidence has not been attached."
+                    ),
                 ),
                 "rollback": self._availability(
                     "not_available", "Rollback evidence is not implemented in Slice 5A."
@@ -972,7 +1327,6 @@ class NamespaceTwinService:
             "optional_states": {
                 slug: "mock_non_authoritative"
                 for slug in (
-                    "dry-run",
                     "rollback",
                     "drift",
                     "mop-replay",
@@ -985,7 +1339,8 @@ class NamespaceTwinService:
                 "requested": 0,
                 "generating": 1,
                 "awaiting_dry_run": 2,
-                "decision_calculating": 3,
+                "dry_run_evidence_attached": 3,
+                "decision_calculating": 4,
             }.get(status, 4),
             "preliminary_summary": preliminary,
             "final_summary": final_summary,

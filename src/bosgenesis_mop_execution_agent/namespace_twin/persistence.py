@@ -578,6 +578,44 @@ class NamespaceTwinRepository:
             )
             return self._event_dict(event)
 
+    def merge_facts(
+        self,
+        twin_id: str,
+        facts: dict[str, Any],
+        *,
+        event_type: str,
+        message: str,
+        event_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Merge redacted evidence facts without weakening terminal immutability."""
+        with self._event_lock, self.sessions.begin() as session:
+            row = session.scalar(
+                select(NamespaceTwinRunRow)
+                .where(NamespaceTwinRunRow.twin_id == twin_id)
+                .with_for_update()
+            )
+            if not row:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            if row.decision_is_final or row.lifecycle_status in TERMINAL_STATES:
+                raise NamespaceTwinPersistenceError(
+                    "terminal_twin_immutable",
+                    "Authoritative evidence cannot modify a terminal namespace twin.",
+                )
+            merged = dict(row.facts_redacted or {})
+            merged.update(redact_value(facts))
+            row.facts_redacted = merged
+            row.updated_at = datetime.now(UTC)
+            row.row_version += 1
+            self._append_event_in_session(
+                session,
+                twin_id,
+                event_type,
+                message,
+                event_payload or {},
+            )
+            return self._run_dict(row)
     def list_events(
         self, twin_id: str, *, limit: int = 100, offset: int = 0
     ) -> tuple[list[dict[str, Any]], int]:
