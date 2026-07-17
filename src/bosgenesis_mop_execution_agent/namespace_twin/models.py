@@ -19,8 +19,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 SCHEMA_VERSION = "1.0.0"
-POLICY_VERSION = "namespace-twin-foundation-v1"
-RISK_RULE_VERSION = "namespace-twin-risk-foundation-v1"
+POLICY_VERSION = "namespace-twin-policy-2026.07.1"
+RISK_RULE_VERSION = "namespace-twin-risk-1.0.0"
 
 ACTIVE_STATES = {
     "requested",
@@ -139,6 +139,37 @@ class NamespaceTwinResourceRow(NamespaceTwinBase):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     namespace: Mapped[str | None] = mapped_column(Text)
     payload_redacted: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class NamespaceTwinDeltaRow(NamespaceTwinBase):
+    __tablename__ = "namespace_twin_release_deltas"
+    __table_args__ = (
+        UniqueConstraint("twin_id", "change_id", name="uq_namespace_twin_delta_change"),
+        Index("idx_namespace_twin_delta_action", "twin_id", "action"),
+        Index("idx_namespace_twin_delta_risk", "twin_id", "risk"),
+        Index("idx_namespace_twin_delta_kind", "twin_id", "kind"),
+    )
+
+    change_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    twin_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("namespace_twin_runs.twin_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    resource_identity: Mapped[str] = mapped_column(Text, nullable=False)
+    api_version: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    namespace: Mapped[str | None] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    helm_release: Mapped[str | None] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    current_summary: Mapped[str | None] = mapped_column(Text)
+    planned_summary: Mapped[str | None] = mapped_column(Text)
+    risk: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_diff: Mapped[str | None] = mapped_column(Text)
+    evidence_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    redacted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 class NamespaceTwinEdgeRow(NamespaceTwinBase):

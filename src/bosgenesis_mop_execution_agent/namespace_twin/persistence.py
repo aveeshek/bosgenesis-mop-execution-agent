@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import and_, case, create_engine, func, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from bosgenesis_mop_execution_agent.namespace_twin.dependency_graph import (
+    stable_edge_id,
+    stable_node_id,
+)
 from bosgenesis_mop_execution_agent.namespace_twin.models import (
     ACTIVE_STATES,
     ALLOWED_TRANSITIONS,
     TERMINAL_STATES,
     NamespaceTwinBase,
     NamespaceTwinDecisionRow,
+    NamespaceTwinDeltaRow,
     NamespaceTwinEdgeRow,
     NamespaceTwinEventRow,
     NamespaceTwinFindingRow,
@@ -70,6 +75,7 @@ class NamespaceTwinRepository:
         resources: list[dict[str, Any]],
         edges: list[dict[str, Any]],
         findings: list[dict[str, Any]],
+        deltas: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         with self.sessions.begin() as session:
             existing = session.scalar(
@@ -96,6 +102,8 @@ class NamespaceTwinRepository:
                 session.add(NamespaceTwinEdgeRow(twin_id=row.twin_id, **item))
             for item in findings:
                 session.add(NamespaceTwinFindingRow(twin_id=row.twin_id, **item))
+            for item in deltas or []:
+                session.add(NamespaceTwinDeltaRow(twin_id=row.twin_id, **item))
             self._append_event_in_session(
                 session,
                 row.twin_id,
@@ -109,6 +117,189 @@ class NamespaceTwinRepository:
                 },
             )
             return self._run_dict(row), True
+
+    def list_release_deltas(
+        self,
+        twin_id: str,
+        *,
+        action: str | None = None,
+        risk: str | None = None,
+        kind: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+        with self.sessions() as session:
+            if session.get(NamespaceTwinRunRow, twin_id) is None:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            statement = select(NamespaceTwinDeltaRow).where(
+                NamespaceTwinDeltaRow.twin_id == twin_id
+            )
+            if action:
+                statement = statement.where(NamespaceTwinDeltaRow.action == action)
+            if risk:
+                statement = statement.where(NamespaceTwinDeltaRow.risk == risk)
+            if kind:
+                statement = statement.where(NamespaceTwinDeltaRow.kind == kind)
+            filtered = statement.subquery()
+            total = int(session.scalar(select(func.count()).select_from(filtered)) or 0)
+            rows = session.scalars(
+                statement.order_by(
+                    NamespaceTwinDeltaRow.kind,
+                    NamespaceTwinDeltaRow.namespace,
+                    NamespaceTwinDeltaRow.name,
+                    NamespaceTwinDeltaRow.action,
+                )
+                .offset(offset)
+                .limit(limit)
+            ).all()
+            summary_rows = session.execute(
+                select(NamespaceTwinDeltaRow.action, func.count())
+                .where(NamespaceTwinDeltaRow.twin_id == twin_id)
+                .group_by(NamespaceTwinDeltaRow.action)
+            ).all()
+            summary = {str(row[0]): int(row[1]) for row in summary_rows}
+            summary["total"] = sum(summary.values())
+            return [self._delta_dict(row) for row in rows], total, summary
+
+    def list_dependency_graph(
+        self,
+        twin_id: str,
+        *,
+        kind: str | None = None,
+        risk: str | None = None,
+        status: str | None = None,
+        namespace: str | None = None,
+        relationship: str | None = None,
+        confidence: str | None = None,
+        edge_status: str | None = None,
+        search: str | None = None,
+        missing_only: bool = False,
+        resource: str | None = None,
+        node_limit: int = 100,
+        node_offset: int = 0,
+        edge_limit: int = 100,
+        edge_offset: int = 0,
+    ) -> dict[str, Any]:
+        with self.sessions() as session:
+            if session.get(NamespaceTwinRunRow, twin_id) is None:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            node_rows = session.scalars(
+                select(NamespaceTwinResourceRow)
+                .where(NamespaceTwinResourceRow.twin_id == twin_id)
+                .order_by(
+                    NamespaceTwinResourceRow.kind,
+                    NamespaceTwinResourceRow.namespace,
+                    NamespaceTwinResourceRow.name,
+                )
+            ).all()
+            edge_rows = session.scalars(
+                select(NamespaceTwinEdgeRow)
+                .where(NamespaceTwinEdgeRow.twin_id == twin_id)
+                .order_by(
+                    NamespaceTwinEdgeRow.edge_type,
+                    NamespaceTwinEdgeRow.source_identity,
+                    NamespaceTwinEdgeRow.target_identity,
+                )
+            ).all()
+            nodes = [self._resource_dict(row) for row in node_rows]
+            by_identity = {node["resource_identity"]: node for node in nodes}
+            edges = [self._graph_edge_dict(row, by_identity) for row in edge_rows]
+            summary = self._graph_summary(nodes, edges)
+
+            needle = str(search or "").strip().lower()
+            filtered_nodes = [
+                node
+                for node in nodes
+                if (not kind or node["kind"] == kind)
+                and (not risk or node["risk"] == risk)
+                and (not status or node["status"] == status)
+                and (not namespace or (node.get("namespace") or "_cluster") == namespace)
+                and (not missing_only or node["status"] in {"missing", "uncertain"})
+                and (
+                    not needle
+                    or needle
+                    in " ".join(
+                        [
+                            node["node_id"],
+                            node["resource_identity"],
+                            node["kind"],
+                            node["name"],
+                            str(node.get("namespace") or "cluster-scoped"),
+                        ]
+                    ).lower()
+                )
+            ]
+            node_filter_active = bool(kind or risk or status or namespace or missing_only or needle)
+            node_identities = {node["resource_identity"] for node in filtered_nodes}
+            filtered_edges = [
+                edge
+                for edge in edges
+                if (not relationship or edge["relationship"] == relationship)
+                and (not confidence or edge["confidence"] == confidence)
+                and (not edge_status or edge["status"] == edge_status)
+                and (not missing_only or edge["status"] in {"missing", "uncertain"})
+                and (
+                    not needle
+                    or needle
+                    in " ".join(
+                        [
+                            edge["source"],
+                            edge["target"],
+                            edge["source_identity"],
+                            edge["target_identity"],
+                            edge["source_label"],
+                            edge["target_label"],
+                            edge["relationship"],
+                            edge["status"],
+                            edge["risk"],
+                            edge["confidence"],
+                        ]
+                    ).lower()
+                )
+                and (
+                    not node_filter_active
+                    or edge["source_identity"] in node_identities
+                    or edge["target_identity"] in node_identities
+                )
+            ]
+            edge_filter_active = bool(relationship or confidence or edge_status)
+            if edge_filter_active:
+                connected = {
+                    identity
+                    for edge in filtered_edges
+                    for identity in (edge["source_identity"], edge["target_identity"])
+                }
+                filtered_nodes = [
+                    node for node in filtered_nodes if node["resource_identity"] in connected
+                ]
+
+            node_total = len(filtered_nodes)
+            edge_total = len(filtered_edges)
+            node_page = filtered_nodes[node_offset : node_offset + node_limit]
+            edge_page = filtered_edges[edge_offset : edge_offset + edge_limit]
+            page_identities = {node["resource_identity"] for node in node_page}
+            graph_edges = [
+                edge
+                for edge in filtered_edges
+                if edge["source_identity"] in page_identities
+                and edge["target_identity"] in page_identities
+            ]
+            selected_context = self._selected_graph_context(resource, nodes=nodes, edges=edges)
+            return {
+                "summary": summary,
+                "nodes": node_page,
+                "edges": graph_edges,
+                "table_rows": edge_page,
+                "node_result_count": node_total,
+                "edge_result_count": edge_total,
+                "node_has_more": node_offset + len(node_page) < node_total,
+                "edge_has_more": edge_offset + len(edge_page) < edge_total,
+                "selected_context": selected_context,
+            }
 
     def get_run(self, twin_id: str) -> dict[str, Any]:
         with self.sessions() as session:
@@ -168,6 +359,149 @@ class NamespaceTwinRepository:
                 .limit(limit)
             ).all()
             return [self._run_dict(row) for row in rows], total
+
+    def list_runs_v5(
+        self,
+        *,
+        search: str | None = None,
+        decision: str | None = None,
+        lifecycle_status: str | None = None,
+        target_namespace: str | None = None,
+        bundle_name: str | None = None,
+        actor_id: str | None = None,
+        freshness: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        linked_execution: str | None = None,
+        sort: str = "created_at",
+        direction: str = "desc",
+        limit: int = 25,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+        """Return a filtered page plus metrics from the same authoritative query."""
+        with self.sessions() as session:
+            statement = select(NamespaceTwinRunRow)
+            count_statement = select(func.count()).select_from(NamespaceTwinRunRow)
+            clauses: list[Any] = []
+            if search:
+                pattern = f"%{search.strip()}%"
+                clauses.append(
+                    or_(
+                        NamespaceTwinRunRow.twin_id.ilike(pattern),
+                        NamespaceTwinRunRow.display_name.ilike(pattern),
+                        NamespaceTwinRunRow.target_cluster.ilike(pattern),
+                        NamespaceTwinRunRow.target_namespace.ilike(pattern),
+                        NamespaceTwinRunRow.bundle_name.ilike(pattern),
+                    )
+                )
+            if decision and decision != "all":
+                clauses.append(NamespaceTwinRunRow.decision == decision)
+            if lifecycle_status and lifecycle_status != "all":
+                clauses.append(NamespaceTwinRunRow.lifecycle_status == lifecycle_status)
+            if target_namespace:
+                clauses.append(NamespaceTwinRunRow.target_namespace == target_namespace)
+            if bundle_name:
+                clauses.append(NamespaceTwinRunRow.bundle_name.ilike(f"%{bundle_name.strip()}%"))
+            if actor_id:
+                clauses.append(NamespaceTwinRunRow.actor_id == actor_id)
+            if created_from:
+                clauses.append(NamespaceTwinRunRow.created_at >= created_from)
+            if created_to:
+                clauses.append(NamespaceTwinRunRow.created_at <= created_to)
+
+            now = datetime.now(UTC)
+            threshold = now + timedelta(minutes=30)
+            if freshness == "expired":
+                clauses.append(
+                    or_(
+                        NamespaceTwinRunRow.lifecycle_status == "expired",
+                        NamespaceTwinRunRow.expires_at <= now,
+                    )
+                )
+            elif freshness == "superseded":
+                clauses.append(NamespaceTwinRunRow.lifecycle_status == "superseded")
+            elif freshness == "approaching_expiry":
+                clauses.append(
+                    and_(
+                        NamespaceTwinRunRow.expires_at > now,
+                        NamespaceTwinRunRow.expires_at <= threshold,
+                    )
+                )
+            elif freshness == "fresh":
+                clauses.append(
+                    or_(
+                        NamespaceTwinRunRow.expires_at.is_(None),
+                        NamespaceTwinRunRow.expires_at > threshold,
+                    )
+                )
+            elif freshness in {"stale", "drifted"}:
+                clauses.append(NamespaceTwinRunRow.twin_id == "__unsupported_freshness_state__")
+            if linked_execution == "linked":
+                clauses.append(NamespaceTwinRunRow.twin_id == "__no_execution_relationship_yet__")
+
+            if clauses:
+                statement = statement.where(*clauses)
+                count_statement = count_statement.where(*clauses)
+            total = int(session.scalar(count_statement) or 0)
+
+            metrics_statement = select(
+                func.count().label("total"),
+                func.sum(case((NamespaceTwinRunRow.decision == "green", 1), else_=0)).label(
+                    "green"
+                ),
+                func.sum(case((NamespaceTwinRunRow.decision == "amber", 1), else_=0)).label(
+                    "amber"
+                ),
+                func.sum(case((NamespaceTwinRunRow.decision == "red", 1), else_=0)).label("red"),
+                func.sum(
+                    case((NamespaceTwinRunRow.lifecycle_status.in_(ACTIVE_STATES), 1), else_=0)
+                ).label("generating"),
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                NamespaceTwinRunRow.lifecycle_status == "expired",
+                                NamespaceTwinRunRow.expires_at <= now,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("stale"),
+            ).select_from(NamespaceTwinRunRow)
+            if clauses:
+                metrics_statement = metrics_statement.where(*clauses)
+            metric_row = session.execute(metrics_statement).one()
+            metrics = {
+                "total": int(metric_row.total or 0),
+                "green": int(metric_row.green or 0),
+                "amber": int(metric_row.amber or 0),
+                "red": int(metric_row.red or 0),
+                "generating": int(metric_row.generating or 0),
+                "stale": int(metric_row.stale or 0),
+                "linked": 0,
+            }
+
+            sort_columns = {
+                "created_at": NamespaceTwinRunRow.created_at,
+                "updated_at": NamespaceTwinRunRow.updated_at,
+                "display_name": NamespaceTwinRunRow.display_name,
+                "lifecycle_status": NamespaceTwinRunRow.lifecycle_status,
+                "decision": NamespaceTwinRunRow.decision,
+                "target_namespace": NamespaceTwinRunRow.target_namespace,
+                "bundle_name": NamespaceTwinRunRow.bundle_name,
+            }
+            sort_column = sort_columns.get(sort, NamespaceTwinRunRow.created_at)
+            primary_order = sort_column.asc() if direction == "asc" else sort_column.desc()
+            secondary_order = (
+                NamespaceTwinRunRow.twin_id.asc()
+                if direction == "asc"
+                else NamespaceTwinRunRow.twin_id.desc()
+            )
+            rows = session.scalars(
+                statement.order_by(primary_order, secondary_order).offset(offset).limit(limit)
+            ).all()
+            return [self._run_dict(row) for row in rows], total, metrics
 
     def transition(
         self,
@@ -443,6 +777,216 @@ class NamespaceTwinRepository:
         session.add(event)
         session.flush()
         return event
+
+    @staticmethod
+    def _resource_dict(row: NamespaceTwinResourceRow) -> dict[str, Any]:
+        payload = dict(row.payload_redacted or {})
+        evidence_refs = [str(item) for item in payload.get("evidence_refs") or []]
+        return {
+            "node_id": str(payload.get("node_id") or stable_node_id(row.stable_identity)),
+            "resource_identity": row.stable_identity,
+            "api_version": row.api_version,
+            "kind": row.kind,
+            "name": row.name,
+            "namespace": row.namespace,
+            "source": str(payload.get("source") or "rendered_manifest"),
+            "status": str(payload.get("status") or "present"),
+            "risk": str(payload.get("risk") or "low"),
+            "synthetic": bool(payload.get("synthetic")),
+            "evidence_refs": evidence_refs or [str(payload.get("path") or "bundle")],
+            "details": {
+                "path": payload.get("path"),
+                "document_index": payload.get("document_index"),
+                **(payload.get("details") if isinstance(payload.get("details"), dict) else {}),
+            },
+        }
+
+    @staticmethod
+    def _graph_edge_dict(
+        row: NamespaceTwinEdgeRow, by_identity: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        source_node = by_identity.get(row.source_identity) or {}
+        target_node = by_identity.get(row.target_identity) or {}
+        statuses = {
+            str(source_node.get("status") or "missing"),
+            str(target_node.get("status") or "missing"),
+        }
+        status = (
+            "missing"
+            if "missing" in statuses
+            else "uncertain"
+            if "uncertain" in statuses
+            else "valid"
+        )
+        risks = [
+            str(source_node.get("risk") or "unknown"),
+            str(target_node.get("risk") or "unknown"),
+        ]
+        risk = next(
+            (item for item in ("critical", "high", "medium", "unknown", "low") if item in risks),
+            "low",
+        )
+        return {
+            "edge_id": stable_edge_id(row.source_identity, row.target_identity, row.edge_type),
+            "source": source_node.get("node_id") or stable_node_id(row.source_identity),
+            "target": target_node.get("node_id") or stable_node_id(row.target_identity),
+            "source_identity": row.source_identity,
+            "target_identity": row.target_identity,
+            "source_label": (
+                f"{source_node.get('kind') or 'Unknown'}/"
+                f"{source_node.get('name') or row.source_identity}"
+            ),
+            "target_label": (
+                f"{target_node.get('kind') or 'Unknown'}/"
+                f"{target_node.get('name') or row.target_identity}"
+            ),
+            "relationship": row.edge_type,
+            "status": status,
+            "risk": risk,
+            "confidence": row.confidence,
+            "evidence_refs": [str(item) for item in row.evidence_refs or []],
+        }
+
+    @staticmethod
+    def _graph_summary(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, Any]:
+        status_counts: dict[str, int] = {}
+        risk_counts: dict[str, int] = {}
+        relationship_counts: dict[str, int] = {}
+        for node in nodes:
+            status_counts[node["status"]] = status_counts.get(node["status"], 0) + 1
+            risk_counts[node["risk"]] = risk_counts.get(node["risk"], 0) + 1
+        for edge in edges:
+            relationship_counts[edge["relationship"]] = (
+                relationship_counts.get(edge["relationship"], 0) + 1
+            )
+        return {
+            "nodes": len(nodes),
+            "edges": len(edges),
+            "present": int(status_counts.get("present") or 0),
+            "missing": int(status_counts.get("missing") or 0),
+            "uncertain": int(status_counts.get("uncertain") or 0),
+            "valid_edges": sum(edge["status"] == "valid" for edge in edges),
+            "missing_edges": sum(edge["status"] == "missing" for edge in edges),
+            "uncertain_edges": sum(edge["status"] == "uncertain" for edge in edges),
+            "high_risk_nodes": int(risk_counts.get("high") or 0)
+            + int(risk_counts.get("critical") or 0),
+            "relationship_counts": relationship_counts,
+        }
+
+    @staticmethod
+    def _selected_graph_context(
+        resource: str | None,
+        *,
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        requested = str(resource or "").strip()
+        if not requested:
+            return None
+        selected = next(
+            (node for node in nodes if requested in {node["node_id"], node["resource_identity"]}),
+            None,
+        )
+        if selected is None:
+            return {"requested": requested, "found": False, "impact_paths": []}
+        node_by_id = {node["node_id"]: node for node in nodes}
+        inbound = [edge for edge in edges if edge["target"] == selected["node_id"]]
+        outbound = [edge for edge in edges if edge["source"] == selected["node_id"]]
+        paths: list[dict[str, Any]] = []
+        queue: list[tuple[str, list[str], list[dict[str, Any]]]] = [
+            (selected["node_id"], [selected["node_id"]], [])
+        ]
+        while queue and len(paths) < 12:
+            current, path, path_edges = queue.pop(0)
+            for edge in edges:
+                if edge["source"] != current or edge["target"] in path:
+                    continue
+                next_path = [*path, edge["target"]]
+                next_edges = [*path_edges, edge]
+                target = node_by_id.get(edge["target"])
+                if target:
+                    statuses = [item["status"] for item in next_edges]
+                    risks = [item["risk"] for item in next_edges]
+                    confidences = [str(item["confidence"] or "unknown") for item in next_edges]
+                    confidence = next(
+                        (
+                            item
+                            for item in ("uncertain", "medium", "high", "deterministic")
+                            if item in confidences
+                        ),
+                        "uncertain",
+                    )
+                    paths.append(
+                        {
+                            "nodes": [
+                                node_by_id[item]["resource_identity"]
+                                for item in next_path
+                                if item in node_by_id
+                            ],
+                            "relationships": [item["relationship"] for item in next_edges],
+                            "status": (
+                                "missing"
+                                if "missing" in statuses
+                                else "uncertain"
+                                if "uncertain" in statuses
+                                else "valid"
+                            ),
+                            "risk": next(
+                                (
+                                    item
+                                    for item in (
+                                        "critical",
+                                        "high",
+                                        "medium",
+                                        "unknown",
+                                        "low",
+                                    )
+                                    if item in risks
+                                ),
+                                "low",
+                            ),
+                            "confidence": confidence,
+                            "evidence_refs": list(
+                                dict.fromkeys(
+                                    ref
+                                    for path_edge in next_edges
+                                    for ref in path_edge["evidence_refs"]
+                                )
+                            ),
+                        }
+                    )
+                    if len(next_path) < 4:
+                        queue.append((edge["target"], next_path, next_edges))
+                if len(paths) >= 12:
+                    break
+        return {
+            "requested": requested,
+            "found": True,
+            "node": selected,
+            "inbound_edges": inbound[:25],
+            "outbound_edges": outbound[:25],
+            "impact_paths": paths,
+        }
+
+    @staticmethod
+    def _delta_dict(row: NamespaceTwinDeltaRow) -> dict[str, Any]:
+        return {
+            "change_id": row.change_id,
+            "resource_identity": row.resource_identity,
+            "api_version": row.api_version,
+            "kind": row.kind,
+            "namespace": row.namespace,
+            "name": row.name,
+            "helm_release": row.helm_release,
+            "action": row.action,
+            "current_summary": row.current_summary,
+            "planned_summary": row.planned_summary,
+            "risk": row.risk,
+            "reason": row.reason,
+            "canonical_diff": row.canonical_diff,
+            "evidence_refs": list(row.evidence_refs or []),
+            "redacted": bool(row.redacted),
+        }
 
     @staticmethod
     def _run_dict(row: NamespaceTwinRunRow) -> dict[str, Any]:

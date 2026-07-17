@@ -40,7 +40,7 @@ def test_real_provisional_twin_is_idempotent_ordered_and_redacted(tmp_path) -> N
     assert [event["sequence"] for event in events] == [1, 2, 3]
     assert "password" not in str(events).lower()
     assert first["facts"]["provisional"] is True
-    assert first["facts"]["module_modes"]["policy"] == "mock_non_authoritative"
+    assert first["facts"]["module_modes"]["policy"] == "real_core"
 
 
 def test_twin_survives_service_restart_and_records_recovery(tmp_path) -> None:

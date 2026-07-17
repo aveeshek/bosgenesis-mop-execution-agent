@@ -81,6 +81,17 @@ async def create_namespace_twin(
 async def list_namespace_twins(
     service: NamespaceTwinServiceDep,
     _: ActorDep,
+    q: str | None = Query(default=None),
+    decision: str | None = Query(default=None),
+    freshness: str | None = Query(default=None),
+    bundle_name: str | None = Query(default=None),
+    actor_id: str | None = Query(default=None),
+    created_from: str | None = Query(default=None),
+    created_to: str | None = Query(default=None),
+    linked_execution: str | None = Query(default=None),
+    sort: str = Query(default="created_at"),
+    direction: str = Query(default="desc"),
+    cursor: str | None = Query(default=None),
     lifecycle_status: str | None = Query(default=None),
     target_namespace: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
@@ -89,6 +100,17 @@ async def list_namespace_twins(
     try:
         result = service.list(
             {
+                "q": q,
+                "decision": decision,
+                "freshness": freshness,
+                "bundle_name": bundle_name,
+                "actor_id": actor_id,
+                "created_from": created_from,
+                "created_to": created_to,
+                "linked_execution": linked_execution,
+                "sort": sort,
+                "direction": direction,
+                "cursor": cursor,
                 "lifecycle_status": lifecycle_status,
                 "target_namespace": target_namespace,
                 "limit": limit,
@@ -108,6 +130,136 @@ async def get_namespace_twin(
 ) -> JSONResponse:
     try:
         return _success(service.get(twin_id), "Real namespace twin returned.")
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.get("/{twin_id}/overview")
+async def get_namespace_twin_overview(
+    twin_id: str,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+) -> JSONResponse:
+    try:
+        return _success(
+            service.overview(twin_id), "Authoritative namespace twin Overview returned."
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.get("/{twin_id}/release-delta")
+async def get_namespace_twin_release_delta(
+    twin_id: str,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+    action: str | None = Query(default=None),
+    risk: str | None = Query(default=None),
+    kind: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=25),
+) -> JSONResponse:
+    try:
+        return _success(
+            service.release_delta(
+                twin_id,
+                action=action,
+                risk=risk,
+                kind=kind,
+                cursor=cursor,
+                limit=limit,
+            ),
+            "Authoritative canonical Release Delta facts returned.",
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.get("/{twin_id}/dependency-graph")
+async def get_namespace_twin_dependency_graph(
+    twin_id: str,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+    kind: str | None = Query(default=None),
+    risk: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    namespace: str | None = Query(default=None),
+    relationship: str | None = Query(default=None),
+    confidence: str | None = Query(default=None),
+    edge_status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    missing_only: bool = Query(default=False),
+    resource: str | None = Query(default=None),
+    node_cursor: str | None = Query(default=None),
+    edge_cursor: str | None = Query(default=None),
+    limit: int = Query(default=100),
+) -> JSONResponse:
+    try:
+        return _success(
+            service.dependency_graph(
+                twin_id,
+                kind=kind,
+                risk=risk,
+                status=status,
+                namespace=namespace,
+                relationship=relationship,
+                confidence=confidence,
+                edge_status=edge_status,
+                search=search,
+                missing_only=missing_only,
+                resource=resource,
+                node_cursor=node_cursor,
+                edge_cursor=edge_cursor,
+                limit=limit,
+            ),
+            "Authoritative Namespace Twin dependency facts returned.",
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.get("/{twin_id}/policy")
+async def get_namespace_twin_policy(
+    twin_id: str,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+    severity: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    effect: str | None = Query(default=None),
+) -> JSONResponse:
+    try:
+        return _success(
+            service.policy(
+                twin_id,
+                severity=severity,
+                category=category,
+                effect=effect,
+            ),
+            "Authoritative deterministic Namespace Twin policy facts returned.",
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.get("/{twin_id}/actions")
+async def get_namespace_twin_actions(
+    twin_id: str,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+) -> JSONResponse:
+    try:
+        twin = service.get(twin_id)
+        return _success(
+            {
+                "schema_version": twin["schema_version"],
+                "twin_id": twin_id,
+                "decision_version": twin["decision_version"],
+                "lifecycle_status": twin["lifecycle_status"],
+                "freshness": twin["freshness"],
+                "actions": twin["actions"],
+            },
+            "Authoritative namespace twin actions returned.",
+        )
     except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
         return _error(exc)
 

@@ -70,6 +70,7 @@ class ArtifactBundle(StrictBaseModel):
     installation_notes_markdown: str | None = None
     artifact_json: dict[str, Any] | None = None
     artifact_index_json: dict[str, Any] | None = None
+    artifact_index_root_path: Path | None = None
     response_json: dict[str, Any] | None = None
     manifests: list[LoadedManifest] = Field(default_factory=list)
     values_files: list[LoadedValuesFile] = Field(default_factory=list)

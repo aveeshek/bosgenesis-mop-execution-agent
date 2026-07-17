@@ -47,7 +47,14 @@ def load_and_validate_bundle(source: BundleSource, target_namespace: str) -> Art
 
     human_mop = _read_optional_text(root, "human-readable-mop.md", "*.human-mop.md")
     artifact_json = _read_optional_json(root, "artifact.json")
-    artifact_index_json = _read_optional_json(root, "artifact-index.json")
+    artifact_index_path = root / "artifact-index.json"
+    if not artifact_index_path.exists():
+        generated_index = root / "deployment-artifacts" / "artifact-index.json"
+        if generated_index.exists():
+            artifact_index_path = generated_index
+    artifact_index_json = (
+        read_json_file(artifact_index_path) if artifact_index_path.exists() else None
+    )
     response_json = _read_optional_json(root, "response.json")
 
     manifests = []
@@ -56,7 +63,7 @@ def load_and_validate_bundle(source: BundleSource, target_namespace: str) -> Art
 
     values_files = [load_values_file(root, values_ref) for values_ref in sorted(plan.values_refs)]
 
-    _validate_artifact_index_refs(root, artifact_index_json)
+    _validate_artifact_index_refs(artifact_index_path.parent, artifact_index_json)
 
     return ArtifactBundle(
         root_path=root,
@@ -67,6 +74,7 @@ def load_and_validate_bundle(source: BundleSource, target_namespace: str) -> Art
         installation_notes_markdown=installation_notes,
         artifact_json=artifact_json,
         artifact_index_json=artifact_index_json,
+        artifact_index_root_path=artifact_index_path.parent,
         response_json=response_json,
         manifests=manifests,
         values_files=values_files,
@@ -93,12 +101,39 @@ def _read_optional_json(root: Path, filename: str) -> dict[str, Any] | None:
     return read_json_file(path)
 
 
+
+def artifact_index_file_entries(artifact_index: dict[str, Any]) -> list[Any]:
+    """Return file entries from either indexed or generated deployment-artifact layouts."""
+    files = artifact_index.get("files")
+    if files is not None:
+        if not isinstance(files, list):
+            raise BundleValidationError("artifact_index_files_not_list")
+        return files
+
+    referenced_paths: list[str] = []
+    for key in (
+        "values",
+        "kubernetes_manifests",
+        "raw_configmaps",
+        "crds",
+        "rendered_manifests",
+    ):
+        values = artifact_index.get(key) or []
+        if isinstance(values, list):
+            referenced_paths.extend(value for value in values if isinstance(value, str))
+    commands = artifact_index.get("commands")
+    if isinstance(commands, str):
+        referenced_paths.append(commands)
+    chart = artifact_index.get("chart") or {}
+    if isinstance(chart, dict):
+        package = chart.get("package")
+        if isinstance(package, str):
+            referenced_paths.append(package)
+    return [{"path": path} for path in dict.fromkeys(referenced_paths)]
 def _validate_artifact_index_refs(root: Path, artifact_index: dict[str, Any] | None) -> None:
     if artifact_index is None:
         return
-    files = artifact_index.get("files")
-    if not isinstance(files, list):
-        raise BundleValidationError("artifact_index_files_not_list")
+    files = artifact_index_file_entries(artifact_index)
     for entry in files:
         if not isinstance(entry, dict):
             raise BundleValidationError("artifact_index_entry_not_object")
