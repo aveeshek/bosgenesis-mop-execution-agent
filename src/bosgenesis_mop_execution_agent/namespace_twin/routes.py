@@ -56,6 +56,24 @@ class NamespaceTwinReleaseNoteValidationRequest(BaseModel):
     claims: list[ReleaseNoteClaimRequest] = Field(default_factory=list, max_length=100)
     extraction: ReleaseNoteExtractionRequest
 
+
+class NamespaceTwinReplayResultRequest(BaseModel):
+    replay_id: str | None = Field(default=None, max_length=300)
+    infrastructure_approved: bool
+    approval_id: str = Field(min_length=1, max_length=300)
+    mode: str = Field(min_length=1, max_length=80)
+    isolation_target: str = Field(min_length=1, max_length=300)
+    synthetic_secret_strategy: str = Field(min_length=1, max_length=2000)
+    production_secret_values_copied: bool
+    production_data_copied: bool
+    retention_seconds: int = Field(default=0, ge=0, le=2592000)
+    timeline: list[dict[str, Any]] = Field(min_length=1, max_length=1000)
+    checks: list[dict[str, Any]] = Field(min_length=1, max_length=1000)
+    cleanup_status: str = Field(min_length=1, max_length=80)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+    limitations: list[str] = Field(default_factory=list, max_length=50)
+
+
 def get_namespace_twin_service(request: Request) -> NamespaceTwinService:
     return cast("NamespaceTwinService", request.app.state.namespace_twin_service)
 
@@ -425,6 +443,39 @@ async def validate_namespace_twin_release_note(
         )
     except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
         return _error(exc)
+
+
+@router.get("/{twin_id}/mop-replay")
+async def get_namespace_twin_mop_replay(
+    twin_id: str,
+    service: NamespaceTwinServiceDep,
+    _: ActorDep,
+) -> JSONResponse:
+    try:
+        return _success(service.mop_replay(twin_id), "Namespace Twin MoP replay facts returned.")
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.post("/{twin_id}/mop-replay")
+async def record_namespace_twin_mop_replay(
+    twin_id: str,
+    payload: NamespaceTwinReplayResultRequest,
+    service: NamespaceTwinServiceDep,
+    actor_id: ActorDep,
+) -> JSONResponse:
+    try:
+        return _success(
+            service.record_mop_replay(
+                twin_id,
+                payload.model_dump(mode="json"),
+                actor_id=actor_id,
+            ),
+            "Approved isolated Namespace Twin MoP replay evidence recorded.",
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
 
 @router.get("/{twin_id}/actions")
 async def get_namespace_twin_actions(

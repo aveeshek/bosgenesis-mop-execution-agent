@@ -43,6 +43,10 @@ from bosgenesis_mop_execution_agent.namespace_twin.models import (
     POLICY_VERSION,
     RISK_RULE_VERSION,
 )
+from bosgenesis_mop_execution_agent.namespace_twin.mop_replay_twin import (
+    ReplayEvidenceError,
+    build_replay_result,
+)
 from bosgenesis_mop_execution_agent.namespace_twin.persistence import (
     NamespaceTwinPersistenceError,
     NamespaceTwinRepository,
@@ -230,6 +234,7 @@ class NamespaceTwinService:
                 "dry-run": "real_core",
                 "rollback": "real_core",
                 "drift": "real_core",
+                "mop-replay": "real_core",
                 "runtime-behavior": "real_core",
                 "release-note-validation": "real_core",
                 "audit": "real_core",
@@ -819,6 +824,74 @@ class NamespaceTwinService:
             "data": validation,
         }
 
+    def mop_replay(self, twin_id: str) -> dict[str, Any]:
+        """Return approved isolated replay evidence, or explicit Not Run state."""
+        twin = self.get(twin_id)
+        facts = twin.get("foundation_facts") or {}
+        replay = dict(facts.get("mop_replay_twin") or {})
+        if not replay:
+            return {
+                "schema_version": "1.0.0",
+                "twin_id": twin_id,
+                "decision_version": twin["decision_version"],
+                "lifecycle_status": twin["lifecycle_status"],
+                "freshness": twin["freshness"],
+                "availability": self._availability(
+                    "not_run",
+                    "MoP replay has not run; separately approved isolated replay "
+                    "infrastructure is required.",
+                ),
+                "data": None,
+            }
+        return {
+            "schema_version": "1.0.0",
+            "twin_id": twin_id,
+            "decision_version": twin["decision_version"],
+            "lifecycle_status": twin["lifecycle_status"],
+            "freshness": twin["freshness"],
+            "availability": self._availability(
+                "available", "Authoritative isolated MoP replay evidence is available."
+            ),
+            "data": replay,
+        }
+
+    def record_mop_replay(
+        self,
+        twin_id: str,
+        payload: dict[str, Any],
+        *,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Accept terminal replay facts only after explicit infrastructure approval."""
+        core = self.repository.get_run(twin_id)
+        try:
+            replay = build_replay_result(
+                twin_id=twin_id,
+                source_namespace=core.get("source_namespace"),
+                target_namespace=str(core.get("target_namespace") or ""),
+                target_cluster=str(core.get("target_cluster") or "configured-cluster"),
+                payload=payload,
+            )
+        except ReplayEvidenceError as exc:
+            raise NamespaceTwinError(exc.code, exc.message, status_code=409) from exc
+        before_decision = core.get("decision")
+        before_version = core.get("decision_version")
+        updated = self.repository.record_mop_replay(
+            twin_id,
+            replay=replay,
+            actor_id=actor_id,
+        )
+        if (
+            updated.get("decision") != before_decision
+            or updated.get("decision_version") != before_version
+        ):
+            raise NamespaceTwinError(
+                "replay_changed_decision_authority",
+                "Replay evidence must not rewrite the persisted baseline decision.",
+                status_code=500,
+            )
+        return self.mop_replay(updated["twin_id"])
+
     def validate_release_note(
         self,
         twin_id: str,
@@ -863,6 +936,7 @@ class NamespaceTwinService:
             actor_id=actor_id,
         )
         return self.release_note_validation(updated["twin_id"])
+
     def _collect_runtime_context(self, namespace: str, *, correlation_id: str) -> dict[str, Any]:
         collector = getattr(self.live_collector, "collect_runtime", None)
         if not callable(collector):
@@ -1709,7 +1783,12 @@ class NamespaceTwinService:
                     ),
                 ),
                 "mop-replay": self._availability(
-                    "not_run", "MoP replay is not implemented in Slice 5A."
+                    "available" if facts.get("mop_replay_twin") else "not_run",
+                    (
+                        "Authoritative isolated MoP replay evidence is available."
+                        if facts.get("mop_replay_twin")
+                        else "MoP replay requires separately approved isolated infrastructure."
+                    ),
                 ),
                 "runtime-behavior": self._availability(
                     "available" if runtime_assessment else "not_available",
@@ -1731,12 +1810,7 @@ class NamespaceTwinService:
                     "available", "Authoritative lifecycle events are available."
                 ),
             },
-            "optional_states": {
-                slug: "mock_non_authoritative"
-                for slug in (
-                    "mop-replay",
-                )
-            },
+            "optional_states": {},
             "prior_decision": facts.get("prior_decision"),
             "progress_index": {
                 "requested": 0,

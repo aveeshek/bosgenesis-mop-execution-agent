@@ -777,6 +777,58 @@ class NamespaceTwinRepository:
                 },
             )
             return self._run_dict(row)
+
+    def record_mop_replay(
+        self,
+        twin_id: str,
+        *,
+        replay: dict[str, Any],
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Persist redacted isolated replay evidence without changing decision authority."""
+        with self._event_lock, self.sessions.begin() as session:
+            row = session.scalar(
+                select(NamespaceTwinRunRow)
+                .where(NamespaceTwinRunRow.twin_id == twin_id)
+                .with_for_update()
+            )
+            if not row:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            merged = dict(row.facts_redacted or {})
+            redacted_replay = redact_value(replay)
+            # These validated fields are safety assertions, not secret-bearing values.
+            redacted_replay["production_secret_values_copied"] = False
+            redacted_replay["production_data_copied"] = False
+            redacted_replay["synthetic_secret_strategy"] = replay[
+                "synthetic_secret_strategy"
+            ]
+            merged["mop_replay_twin"] = redacted_replay
+            modes = dict(merged.get("module_modes") or {})
+            modes["mop-replay"] = "real_core"
+            merged["module_modes"] = modes
+            row.facts_redacted = merged
+            row.updated_at = datetime.now(UTC)
+            row.row_version += 1
+            self._append_event_in_session(
+                session,
+                twin_id,
+                "mop_replay_recorded",
+                "Approved isolated MoP Replay Twin evidence recorded.",
+                {
+                    "actor_id": actor_id,
+                    "replay_id": replay.get("replay_id"),
+                    "status": replay.get("status"),
+                    "isolation": replay.get("isolation"),
+                    "cleanup_status": replay.get("cleanup_status"),
+                    "replay_hash": replay.get("replay_hash"),
+                    "model_authority": False,
+                    "execution_eligibility_effect": "none",
+                },
+            )
+            return self._run_dict(row)
+
     def list_events(
         self, twin_id: str, *, limit: int = 100, offset: int = 0
     ) -> tuple[list[dict[str, Any]], int]:
