@@ -35,6 +35,7 @@ data:
   METRICS_ENABLED: {{ .Values.config.metricsEnabled | quote }}
   LANGFUSE_ENABLED: {{ .Values.config.langfuseEnabled | quote }}
   K8S_INSPECTOR_MCP_ENDPOINT: {{ .Values.config.k8sInspectorMcpEndpoint | quote }}
+  NAMESPACE_TWIN_LIVE_COLLECTION_ENABLED: {{ .Values.config.namespaceTwinLiveCollectionEnabled | quote }}
   HELM_MANAGER_MCP_ENDPOINT: {{ .Values.config.helmManagerMcpEndpoint | quote }}
   HELM_MANAGER_REST_TIMEOUT_SECONDS: {{ .Values.config.helmManagerRestTimeoutSeconds | quote }}
   HELM_MANAGER_OPERATION_TIMEOUT: {{ .Values.config.helmManagerOperationTimeout | quote }}

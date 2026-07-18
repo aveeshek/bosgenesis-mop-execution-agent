@@ -17,6 +17,11 @@ from bosgenesis_mop_execution_agent.artifacts.bundle_validator import (
     load_and_validate_bundle,
 )
 from bosgenesis_mop_execution_agent.artifacts.models import ArtifactBundle, BundleSource
+from bosgenesis_mop_execution_agent.namespace_twin.audit_report import (
+    build_audit_event,
+    build_report,
+    render_markdown,
+)
 from bosgenesis_mop_execution_agent.namespace_twin.canonicalization import (
     canonicalize_kubernetes_object,
 )
@@ -24,6 +29,11 @@ from bosgenesis_mop_execution_agent.namespace_twin.delta import calculate_releas
 from bosgenesis_mop_execution_agent.namespace_twin.dependency_graph import (
     EDGE_TYPES,
     build_dependency_graph,
+)
+from bosgenesis_mop_execution_agent.namespace_twin.drift_twin import (
+    assess_drift,
+    capture_baseline,
+    initial_drift_assessment,
 )
 from bosgenesis_mop_execution_agent.namespace_twin.live_snapshot import (
     KubernetesLiveSnapshotCollector,
@@ -38,6 +48,16 @@ from bosgenesis_mop_execution_agent.namespace_twin.persistence import (
     NamespaceTwinRepository,
 )
 from bosgenesis_mop_execution_agent.namespace_twin.policy_twin import evaluate_policy_twin
+from bosgenesis_mop_execution_agent.namespace_twin.release_note_validation import (
+    validate_release_note_claims,
+)
+from bosgenesis_mop_execution_agent.namespace_twin.rollback_twin import (
+    assess_rollback_twin,
+    enrich_rollback_proof,
+)
+from bosgenesis_mop_execution_agent.namespace_twin.runtime_behavior_twin import (
+    assess_runtime_behavior,
+)
 from bosgenesis_mop_execution_agent.plans.models import SUPPORTED_MACHINE_PLAN_SCHEMA_VERSIONS
 from bosgenesis_mop_execution_agent.security import redact_value
 
@@ -122,6 +142,21 @@ class NamespaceTwinService:
                 input_hash=input_hash,
                 target_namespace=target_namespace,
             )
+            rollback_twin = assess_rollback_twin(bundle)
+            runtime_context = self._collect_runtime_context(
+                target_namespace, correlation_id=f"twin-runtime-{uuid4().hex}"
+            )
+            runtime_behavior_twin = assess_runtime_behavior(
+                snapshot,
+                namespace_summary=runtime_context.get("namespace_summary") or {},
+                events=(
+                    list(runtime_context.get("events") or [])
+                    if runtime_context.get("events_collected")
+                    else None
+                ),
+                captured_at=datetime.now(UTC),
+                target_namespace=target_namespace,
+            )
             findings.extend(
                 {
                     "finding_id": f"twinfinding_{uuid4().hex}",
@@ -145,13 +180,13 @@ class NamespaceTwinService:
             ) from exc
 
         now = datetime.now(UTC)
-        snapshot_canonical = json.dumps(
-            snapshot.resources,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
+        drift_baseline = capture_baseline(
+            snapshot,
+            captured_at=now,
+            target_namespace=target_namespace,
         )
-        snapshot_hash = hashlib.sha256(snapshot_canonical.encode("utf-8")).hexdigest()
+        drift_twin = initial_drift_assessment(drift_baseline)
+        snapshot_hash = drift_baseline["hash"]
         twin_id = f"twin_{uuid4().hex}"
         bundle_name = self._bundle_name(source)
         display_source = source_namespace or Path(bundle_name).stem or "bundle"
@@ -171,6 +206,10 @@ class NamespaceTwinService:
             "explicit_deletes": explicit_deletes,
             "provenance": provenance,
             "policy_twin": policy_twin,
+            "rollback_twin": rollback_twin,
+            "runtime_behavior_twin": runtime_behavior_twin,
+            "drift_baseline": drift_baseline,
+            "drift_twin": drift_twin,
             "module_modes": {
                 "release_delta_count": len(deltas),
                 "release_delta_summary": self._delta_summary(deltas),
@@ -189,9 +228,10 @@ class NamespaceTwinService:
                 "dependency-graph": "real_core",
                 "policy": "real_core",
                 "dry-run": "real_core",
-                "rollback": "mock_non_authoritative",
-                "drift": "mock_non_authoritative",
-                "runtime-behavior": "mock_non_authoritative",
+                "rollback": "real_core",
+                "drift": "real_core",
+                "runtime-behavior": "real_core",
+                "release-note-validation": "real_core",
                 "audit": "real_core",
             },
         }
@@ -350,9 +390,7 @@ class NamespaceTwinService:
             supplied = str(payload.get(key) or "").strip()
             observed = str(evidence.get(key) or "").strip()
             expected = (
-                str(core.get(key) or "").strip()
-                if key != "command_fingerprint_hash"
-                else observed
+                str(core.get(key) or "").strip() if key != "command_fingerprint_hash" else observed
             )
             if supplied and supplied != expected:
                 mismatches.append(
@@ -400,6 +438,8 @@ class NamespaceTwinService:
 
         module_modes = dict(facts.get("module_modes") or {})
         module_modes["dry-run"] = "real_core"
+        module_modes["rollback"] = "real_core"
+        rollback_twin = enrich_rollback_proof(dict(facts.get("rollback_twin") or {}), evidence)
         attached_facts = {
             "module_modes": module_modes,
             "dry_run_job_id": job_id,
@@ -407,6 +447,7 @@ class NamespaceTwinService:
             "dry_run_evidence": redact_value(evidence),
             "command_fingerprint_hash": evidence.get("command_fingerprint_hash"),
             "dry_run_attached_at": datetime.now(UTC).isoformat(),
+            "rollback_twin": rollback_twin,
         }
         updated = self.repository.merge_facts(
             twin_id,
@@ -438,13 +479,17 @@ class NamespaceTwinService:
         )
         merged_facts = dict(updated.get("facts") or {})
         merged_facts.update(attached_facts)
-        policy_projection = (
-            (merged_facts.get("policy_twin") or {}).get("decision_projection") or {}
-        )
+        policy_projection = (merged_facts.get("policy_twin") or {}).get("decision_projection") or {}
         projected_decision = str(policy_projection.get("level") or "amber")
         if projected_decision not in {"green", "amber", "red"}:
             projected_decision = "amber"
+        runtime_assessment = merged_facts.get("runtime_behavior_twin") or {}
+        runtime_effect = str(runtime_assessment.get("execution_effect") or "no_uplift")
         decision = "red" if evidence_status != "passed" else projected_decision
+        if runtime_effect == "force_red":
+            decision = "red"
+        elif runtime_effect in {"force_amber", "require_review"} and decision == "green":
+            decision = "amber"
         decision_facts = {
             **merged_facts,
             "dry_run_qualification": {
@@ -459,6 +504,14 @@ class NamespaceTwinService:
                 ),
             },
             "decision_authority": "deterministic_policy_and_authoritative_dry_run",
+            "runtime_qualification": {
+                "risk": runtime_assessment.get("risk") or "unknown",
+                "health": (runtime_assessment.get("current_health") or {}).get("status")
+                or "unknown",
+                "execution_effect": runtime_effect,
+                "may_independently_approve": False,
+                "rules_version": runtime_assessment.get("rules_version"),
+            },
             "provisional": False,
         }
         canonical = json.dumps(
@@ -520,9 +573,7 @@ class NamespaceTwinService:
             needle = str(value).lower()
             field = "resource_identity" if key == "resource" else key
             observations = [
-                item
-                for item in observations
-                if needle in str(item.get(field) or "").lower()
+                item for item in observations if needle in str(item.get(field) or "").lower()
             ]
         deltas, delta_total, delta_summary = self.repository.list_release_deltas(
             twin_id,
@@ -599,6 +650,232 @@ class NamespaceTwinService:
             },
         }
 
+    def rollback(self, twin_id: str) -> dict[str, Any]:
+        """Return the persisted deterministic rollback readiness projection."""
+        twin = self.get(twin_id)
+        facts = twin.get("foundation_facts") or {}
+        assessment = dict(facts.get("rollback_twin") or {})
+        if not assessment:
+            return {
+                "schema_version": "1.0.0",
+                "twin_id": twin_id,
+                "decision_version": twin["decision_version"],
+                "lifecycle_status": twin["lifecycle_status"],
+                "freshness": twin["freshness"],
+                "availability": self._availability(
+                    "not_available",
+                    "This historical twin predates the deterministic Rollback Twin assessment.",
+                ),
+                "data": None,
+            }
+        return {
+            "schema_version": "1.0.0",
+            "twin_id": twin_id,
+            "decision_version": twin["decision_version"],
+            "lifecycle_status": twin["lifecycle_status"],
+            "freshness": twin["freshness"],
+            "availability": self._availability(
+                "available", "Deterministic Rollback Twin facts are available."
+            ),
+            "data": assessment,
+        }
+
+    def drift(self, twin_id: str) -> dict[str, Any]:
+        """Return the latest persisted deterministic drift assessment."""
+        twin = self.get(twin_id)
+        facts = twin.get("foundation_facts") or {}
+        assessment = dict(facts.get("drift_twin") or {})
+        if not assessment:
+            return {
+                "schema_version": "1.0.0",
+                "twin_id": twin_id,
+                "decision_version": twin["decision_version"],
+                "lifecycle_status": twin["lifecycle_status"],
+                "freshness": twin["freshness"],
+                "availability": self._availability(
+                    "not_available",
+                    "This historical twin predates deterministic Drift Twin baselines.",
+                ),
+                "data": None,
+            }
+        return {
+            "schema_version": "1.0.0",
+            "twin_id": twin_id,
+            "decision_version": twin["decision_version"],
+            "lifecycle_status": twin["lifecycle_status"],
+            "freshness": twin["freshness"],
+            "availability": self._availability(
+                "available", "Deterministic Drift Twin facts are available."
+            ),
+            "data": assessment,
+        }
+
+    def refresh_drift(self, twin_id: str, *, actor_id: str) -> dict[str, Any]:
+        """Collect current namespace state read-only and persist new drift evidence."""
+        core = self.repository.get_run(twin_id)
+        facts = core.get("facts") or {}
+        baseline = dict(facts.get("drift_baseline") or {})
+        if not baseline:
+            raise NamespaceTwinError(
+                "drift_baseline_unavailable",
+                "This twin has no deterministic drift baseline; regenerate it before refresh.",
+                status_code=409,
+            )
+        snapshot = self.live_collector.collect(
+            str(core["target_namespace"]),
+            correlation_id=f"twin-drift-{uuid4().hex}",
+        )
+        assessment = assess_drift(
+            baseline,
+            snapshot,
+            captured_at=datetime.now(UTC),
+            target_namespace=str(core["target_namespace"]),
+        )
+        updated = self.repository.record_drift(
+            twin_id,
+            assessment=assessment,
+            actor_id=actor_id,
+        )
+        return self.drift(updated["twin_id"])
+
+    def runtime_behavior(self, twin_id: str) -> dict[str, Any]:
+        """Return the latest persisted rules-first runtime behavior assessment."""
+        twin = self.get(twin_id)
+        facts = twin.get("foundation_facts") or {}
+        assessment = dict(facts.get("runtime_behavior_twin") or {})
+        if not assessment:
+            return {
+                "schema_version": "1.0.0",
+                "twin_id": twin_id,
+                "decision_version": twin["decision_version"],
+                "lifecycle_status": twin["lifecycle_status"],
+                "freshness": twin["freshness"],
+                "availability": self._availability(
+                    "not_available",
+                    "This historical twin predates the rules-first Runtime Behavior Twin.",
+                ),
+                "data": None,
+            }
+        return {
+            "schema_version": "1.0.0",
+            "twin_id": twin_id,
+            "decision_version": twin["decision_version"],
+            "lifecycle_status": twin["lifecycle_status"],
+            "freshness": twin["freshness"],
+            "availability": self._availability(
+                "available", "Rules-first current runtime evidence is available."
+            ),
+            "data": assessment,
+        }
+
+    def refresh_runtime_behavior(self, twin_id: str, *, actor_id: str) -> dict[str, Any]:
+        """Refresh namespace-scoped runtime signals without approving execution."""
+        core = self.repository.get_run(twin_id)
+        namespace = str(core["target_namespace"])
+        correlation_id = f"twin-runtime-{uuid4().hex}"
+        snapshot = self.live_collector.collect(namespace, correlation_id=correlation_id)
+        context = self._collect_runtime_context(namespace, correlation_id=correlation_id)
+        assessment = assess_runtime_behavior(
+            snapshot,
+            namespace_summary=context.get("namespace_summary") or {},
+            events=(list(context.get("events") or []) if context.get("events_collected") else None),
+            captured_at=datetime.now(UTC),
+            target_namespace=namespace,
+        )
+        updated = self.repository.record_runtime_behavior(
+            twin_id,
+            assessment=assessment,
+            actor_id=actor_id,
+        )
+        return self.runtime_behavior(updated["twin_id"])
+
+    def release_note_validation(self, twin_id: str) -> dict[str, Any]:
+        """Return persisted editorial claim validation, or explicit Not Run state."""
+        twin = self.get(twin_id)
+        facts = twin.get("foundation_facts") or {}
+        validation = dict(facts.get("release_note_validation") or {})
+        if not validation:
+            return {
+                "schema_version": "1.0.0",
+                "twin_id": twin_id,
+                "decision_version": twin["decision_version"],
+                "lifecycle_status": twin["lifecycle_status"],
+                "freshness": twin["freshness"],
+                "availability": self._availability(
+                    "not_run",
+                    "Link a release-note artifact to run deterministic claim validation.",
+                ),
+                "data": None,
+            }
+        return {
+            "schema_version": "1.0.0",
+            "twin_id": twin_id,
+            "decision_version": twin["decision_version"],
+            "lifecycle_status": twin["lifecycle_status"],
+            "freshness": twin["freshness"],
+            "availability": self._availability(
+                "available", "Deterministic release-note claim validation is available."
+            ),
+            "data": validation,
+        }
+
+    def validate_release_note(
+        self,
+        twin_id: str,
+        payload: dict[str, Any],
+        *,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Match bounded extracted claims against deterministic twin evidence."""
+        core = self.repository.get_run(twin_id)
+        artifact_id = str(payload.get("release_note_artifact_id") or "").strip()
+        artifact_hash = str(payload.get("release_note_artifact_hash") or "").strip().lower()
+        claims = list(payload.get("claims") or [])
+        extraction = dict(payload.get("extraction") or {})
+        if not artifact_id:
+            raise NamespaceTwinError(
+                "release_note_artifact_required", "release_note_artifact_id is required."
+            )
+        if len(artifact_hash) != 64 or any(
+            char not in "0123456789abcdef" for char in artifact_hash
+        ):
+            raise NamespaceTwinError(
+                "invalid_release_note_hash", "release_note_artifact_hash must be SHA-256."
+            )
+        if len(claims) > 100:
+            raise NamespaceTwinError(
+                "release_note_claim_limit", "At most 100 bounded release-note claims are allowed."
+            )
+        facts = dict(core.get("facts") or {})
+        deltas, _, _ = self.repository.list_release_deltas(twin_id, limit=10000)
+        validation = validate_release_note_claims(
+            twin_id=twin_id,
+            artifact_id=artifact_id,
+            artifact_hash=artifact_hash,
+            claims=claims,
+            extraction=extraction,
+            facts=facts,
+            deltas=deltas,
+        )
+        updated = self.repository.record_release_note_validation(
+            twin_id,
+            validation=validation,
+            actor_id=actor_id,
+        )
+        return self.release_note_validation(updated["twin_id"])
+    def _collect_runtime_context(self, namespace: str, *, correlation_id: str) -> dict[str, Any]:
+        collector = getattr(self.live_collector, "collect_runtime", None)
+        if not callable(collector):
+            return {
+                "available": False,
+                "namespace_summary": {},
+                "events": [],
+                "events_collected": False,
+                "warning": "Runtime event collection is unavailable for this collector.",
+            }
+        result = collector(namespace, correlation_id=correlation_id)
+        return result if isinstance(result, dict) else {}
+
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime:
         try:
@@ -612,6 +889,7 @@ class NamespaceTwinService:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC)
+
     def _get_phase4(self, twin_id: str) -> dict[str, Any]:
         return self.repository.get_run(twin_id)
 
@@ -652,6 +930,59 @@ class NamespaceTwinService:
                 "has_more": offset + len(rows) < total,
             },
         }
+
+    def audit(
+        self,
+        twin_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        """Return the append-only event ledger as a cursor-paginated audit contract."""
+        bounded_limit = self._bounded_int(limit, default=25, minimum=1, maximum=100)
+        offset = self._decode_cursor(cursor, sort="audit_events", direction="asc") if cursor else 0
+        core = self.repository.get_run(twin_id)
+        rows, total = self.repository.list_events(twin_id, limit=bounded_limit, offset=offset)
+        events = [build_audit_event(row, core) for row in rows]
+        next_offset = offset + len(events)
+        projected = self._project(core)
+        return {
+            "schema_version": "1.0.0",
+            "twin_id": twin_id,
+            "decision_version": int(core.get("decision_version") or 0),
+            "lifecycle_status": core.get("lifecycle_status"),
+            "freshness": projected.get("freshness"),
+            "availability": {
+                "state": "available",
+                "message": "Append-only redacted namespace twin audit events are available.",
+                "reason_code": None,
+                "retryable": False,
+                "last_attempt_at": core.get("updated_at"),
+            },
+            "events": events,
+            "page": {
+                "limit": bounded_limit,
+                "offset": offset,
+                "result_count": total,
+                "has_more": next_offset < total,
+                "next_cursor": (
+                    self._encode_cursor(next_offset, sort="audit_events", direction="asc")
+                    if next_offset < total
+                    else None
+                ),
+            },
+            "redacted": True,
+        }
+
+    def report(self, twin_id: str) -> dict[str, Any]:
+        """Build a deterministic, side-effect-free JSON report from persisted facts."""
+        core = self.repository.get_run(twin_id)
+        rows, _ = self.repository.list_events(twin_id, limit=100000, offset=0)
+        return build_report(core, rows)
+
+    def report_markdown(self, twin_id: str) -> str:
+        """Render Markdown from the exact same structured report model as JSON."""
+        return render_markdown(self.report(twin_id))
 
     def _cancel_phase4(self, twin_id: str, *, actor_id: str) -> dict[str, Any]:
         return self.repository.cancel(twin_id, actor_id=actor_id)
@@ -1198,15 +1529,73 @@ class NamespaceTwinService:
         facts = core.get("facts") or {}
         visible = self._visible_lifecycle(status)
         freshness = self._freshness(core)
+        drift_assessment = facts.get("drift_twin") or {}
+        drift_baseline = drift_assessment.get("baseline") or {}
+        drift_current = drift_assessment.get("current_capture") or {}
+        drift_comparison_performed = drift_baseline.get("captured_at") != drift_current.get(
+            "captured_at"
+        ) or drift_baseline.get("hash") != drift_current.get("hash")
+        if (
+            drift_comparison_performed
+            and bool(drift_assessment.get("execution_disabled"))
+            and freshness["status"] not in {"expired", "superseded"}
+        ):
+            freshness = {
+                **freshness,
+                "status": "drifted" if bool(drift_assessment.get("material")) else "stale",
+                "message": (
+                    "Execution eligibility is disabled because material namespace drift "
+                    "was detected."
+                    if bool(drift_assessment.get("material"))
+                    else "Execution eligibility is disabled until namespace drift evidence "
+                    "is refreshed."
+                ),
+            }
         policy_assessment = facts.get("policy_twin") or {}
+        runtime_assessment = facts.get("runtime_behavior_twin") or {}
+        runtime_effect = str(runtime_assessment.get("execution_effect") or "no_uplift")
         risk = (
             self._risk(status, decision)
             if bool(core.get("decision_is_final"))
             else dict(policy_assessment.get("risk_axis") or self._risk(status, decision))
         )
+        runtime_level = str(runtime_assessment.get("risk") or "unknown")
+        risk_order = {"unknown": -1, "low": 0, "medium": 1, "high": 2, "critical": 3}
+        if risk_order.get(runtime_level, -1) > risk_order.get(str(risk.get("level")), -1):
+            risk = {
+                "level": runtime_level,
+                "score": runtime_assessment.get("risk_score"),
+                "source": "runtime_behavior_twin",
+            }
         reasons = self._top_reasons(status, decision, facts, freshness["status"])
+        if runtime_effect != "no_uplift":
+            reasons.append(
+                {
+                    "code": "RUNTIME_RISK_REVIEW",
+                    "summary": str(
+                        runtime_assessment.get("summary")
+                        or "Current runtime evidence requires review."
+                    ),
+                    "severity": "high" if runtime_effect == "force_red" else "medium",
+                    "tab_slug": "runtime-behavior",
+                }
+            )
+            reasons = reasons[:5]
         recommendation = self._recommended_action(status, decision, freshness["status"])
+        if runtime_effect == "force_red":
+            recommendation = (
+                "Resolve critical current runtime signals and refresh the twin before execution."
+            )
+        elif runtime_effect in {"force_amber", "require_review"} and decision == "green":
+            recommendation = (
+                "Review current runtime signals and obtain bounded approval before execution."
+            )
         actions = self._actions(core, freshness["status"])
+        autonomy_eligibility = self._autonomy_eligibility(status, decision, freshness["status"])
+        if runtime_effect == "force_red":
+            autonomy_eligibility = "ineligible"
+        elif runtime_effect in {"force_amber", "require_review"} and decision == "green":
+            autonomy_eligibility = "approval_required"
         preliminary = {
             "status": "preliminary",
             "headline": self._preliminary_headline(visible, facts),
@@ -1234,9 +1623,7 @@ class NamespaceTwinService:
             **core,
             "visible_lifecycle": visible,
             "risk": risk,
-            "autonomy_eligibility": self._autonomy_eligibility(
-                status, decision, freshness["status"]
-            ),
+            "autonomy_eligibility": autonomy_eligibility,
             "recommended_action": recommendation,
             "freshness": freshness,
             "target": {
@@ -1306,19 +1693,39 @@ class NamespaceTwinService:
                     ),
                 ),
                 "rollback": self._availability(
-                    "not_available", "Rollback evidence is not implemented in Slice 5A."
+                    "available" if facts.get("rollback_twin") else "not_available",
+                    (
+                        "Deterministic Rollback Twin facts are available."
+                        if facts.get("rollback_twin")
+                        else "This twin predates the deterministic Rollback Twin assessment."
+                    ),
                 ),
                 "drift": self._availability(
-                    "not_run", "Drift evaluation is not implemented in Slice 5A."
+                    "available" if facts.get("drift_twin") else "not_available",
+                    (
+                        "Deterministic Drift Twin facts are available."
+                        if facts.get("drift_twin")
+                        else "This twin predates deterministic Drift Twin baselines."
+                    ),
                 ),
                 "mop-replay": self._availability(
                     "not_run", "MoP replay is not implemented in Slice 5A."
                 ),
                 "runtime-behavior": self._availability(
-                    "not_available", "Runtime behavior is not implemented in Slice 5A."
+                    "available" if runtime_assessment else "not_available",
+                    (
+                        "Rules-first current Runtime Behavior Twin facts are available."
+                        if runtime_assessment
+                        else "This twin predates the rules-first Runtime Behavior Twin."
+                    ),
                 ),
                 "release-note-validation": self._availability(
-                    "not_run", "Release-note validation is not implemented in Slice 5A."
+                    "available" if facts.get("release_note_validation") else "not_run",
+                    (
+                        "Deterministic release-note claim validation is available."
+                        if facts.get("release_note_validation")
+                        else "Link a release-note artifact to run deterministic claim validation."
+                    ),
                 ),
                 "audit": self._availability(
                     "available", "Authoritative lifecycle events are available."
@@ -1327,14 +1734,10 @@ class NamespaceTwinService:
             "optional_states": {
                 slug: "mock_non_authoritative"
                 for slug in (
-                    "rollback",
-                    "drift",
                     "mop-replay",
-                    "runtime-behavior",
-                    "release-note-validation",
                 )
             },
-            "prior_decision": None,
+            "prior_decision": facts.get("prior_decision"),
             "progress_index": {
                 "requested": 0,
                 "generating": 1,
@@ -1579,6 +1982,13 @@ class NamespaceTwinService:
         historical = status in {"superseded", "expired"}
         stale = freshness in {"expired", "superseded", "stale", "drifted"}
         report_ready = bool(core.get("report_hash"))
+        runtime_assessment = (core.get("facts") or {}).get("runtime_behavior_twin") or {}
+        runtime_effect = str(runtime_assessment.get("execution_effect") or "no_uplift")
+        runtime_blocks_execution = runtime_effect in {
+            "force_red",
+            "force_amber",
+            "require_review",
+        }
         twin_id = core["twin_id"]
         actions = [
             self._eligibility_action(
@@ -1615,19 +2025,52 @@ class NamespaceTwinService:
                 f"/api/digital-twins/{twin_id}/events",
             ),
             self._eligibility_action(
+                "refresh_drift",
+                "Refresh Drift",
+                bool((core.get("facts") or {}).get("drift_baseline")),
+                (
+                    "eligible"
+                    if bool((core.get("facts") or {}).get("drift_baseline"))
+                    else "not_available"
+                ),
+                f"/api/digital-twins/{twin_id}/drift/refresh",
+                method="POST",
+            ),
+            self._eligibility_action(
+                "refresh_runtime_behavior",
+                "Refresh Runtime Behavior",
+                bool(runtime_assessment),
+                "eligible" if runtime_assessment else "not_available",
+                f"/api/digital-twins/{twin_id}/runtime-behavior/refresh",
+                method="POST",
+            ),
+            self._eligibility_action(
                 "request_approval",
                 "Request Approval",
-                decision == "amber" and not stale,
-                "eligible" if decision == "amber" and not stale else "approval_required",
+                (decision == "amber" or runtime_effect in {"force_amber", "require_review"})
+                and not stale,
+                (
+                    "eligible"
+                    if (decision == "amber" or runtime_effect in {"force_amber", "require_review"})
+                    and not stale
+                    else "approval_required"
+                ),
                 f"/approvals?twin_id={twin_id}",
             ),
             self._eligibility_action(
                 "start_execution",
                 "Start Execution",
-                decision == "green" and not stale and not historical,
+                decision == "green"
+                and not stale
+                and not historical
+                and not runtime_blocks_execution,
                 "eligible"
-                if decision == "green" and not stale
-                else ("decision_red" if decision == "red" else "approval_required"),
+                if decision == "green" and not stale and not runtime_blocks_execution
+                else (
+                    "runtime_review_required"
+                    if runtime_blocks_execution
+                    else ("decision_red" if decision == "red" else "approval_required")
+                ),
                 f"/mop-execution?twin_id={twin_id}",
             ),
             self._eligibility_action(
@@ -1805,10 +2248,13 @@ class NamespaceTwinService:
         canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _resources(bundle: ArtifactBundle) -> list[dict[str, Any]]:
+    @classmethod
+    def _resources(cls, bundle: ArtifactBundle) -> list[dict[str, Any]]:
         resources: list[dict[str, Any]] = []
+        rollback_evidence_paths = cls._rollback_evidence_manifest_paths(bundle)
         for manifest in bundle.manifests:
+            if Path(manifest.path).as_posix() in rollback_evidence_paths:
+                continue
             namespace = (
                 None
                 if manifest.scope == "cluster"
@@ -1837,6 +2283,32 @@ class NamespaceTwinService:
                 }
             )
         return resources
+
+    @staticmethod
+    def _rollback_evidence_manifest_paths(bundle: ArtifactBundle) -> set[str]:
+        """Keep previous-state evidence out of the desired resource projection."""
+        paths: set[str] = set()
+        for entry in artifact_index_file_entries(bundle.artifact_index_json or {}):
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get("path")
+            role = str(entry.get("role") or "").lower()
+            if isinstance(path, str) and (
+                "previous" in role or "rollback" in role or "baseline" in role
+            ):
+                paths.add(Path(path).as_posix())
+
+        for phase in bundle.machine_plan.phases:
+            phase_text = " ".join(
+                [str(phase.phase_id), str(phase.title), str(phase.objective)]
+            ).lower()
+            for step in phase.steps:
+                step_text = " ".join(
+                    [phase_text, str(step.step_id), str(step.title), str(step.type)]
+                ).lower()
+                if "rollback" in step_text or "revert" in step_text or "restore" in step_text:
+                    paths.update(Path(path).as_posix() for path in step.manifest_refs)
+        return paths
 
     @staticmethod
     def _owner_edges(bundle: ArtifactBundle) -> list[dict[str, Any]]:

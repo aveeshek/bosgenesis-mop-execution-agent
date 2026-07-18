@@ -150,6 +150,9 @@ class KubernetesInspectorRestDryRunClient:
     def list_ingresses(self, namespace: str) -> McpCallResult:
         return self._get_collection("/ingresses", namespace, "ingress.list")
 
+    def list_events(self, namespace: str) -> McpCallResult:
+        return self._get_collection("/events", namespace, "event.list")
+
     def delete_collection(
         self,
         *,

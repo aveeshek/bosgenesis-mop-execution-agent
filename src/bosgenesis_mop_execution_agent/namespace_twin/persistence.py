@@ -616,6 +616,167 @@ class NamespaceTwinRepository:
                 event_payload or {},
             )
             return self._run_dict(row)
+
+    def record_drift(
+        self,
+        twin_id: str,
+        *,
+        assessment: dict[str, Any],
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Persist a drift evidence version and supersede execution eligibility atomically."""
+        with self._event_lock, self.sessions.begin() as session:
+            row = session.scalar(
+                select(NamespaceTwinRunRow)
+                .where(NamespaceTwinRunRow.twin_id == twin_id)
+                .with_for_update()
+            )
+            if not row:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            merged = dict(row.facts_redacted or {})
+            merged["drift_twin"] = redact_value(assessment)
+            modes = dict(merged.get("module_modes") or {})
+            modes["drift"] = "real_core"
+            merged["module_modes"] = modes
+            material = bool(assessment.get("material"))
+            if material:
+                merged["decision_invalidated_by_drift"] = True
+                merged["prior_decision"] = {
+                    "decision": row.decision,
+                    "decision_version": row.decision_version,
+                    "decision_is_final": bool(row.decision_is_final),
+                    "report_hash": row.report_hash,
+                }
+            row.facts_redacted = merged
+            now = datetime.now(UTC)
+            previous = row.lifecycle_status
+            if material and row.lifecycle_status != "superseded":
+                row.lifecycle_status = "superseded"
+                row.superseded_by = (
+                    f"drift:{str((assessment.get('current_capture') or {}).get('hash') or '')[:24]}"
+                )
+                row.completed_at = now
+            row.updated_at = now
+            row.row_version += 1
+            self._append_event_in_session(
+                session,
+                twin_id,
+                "drift_refreshed",
+                "Read-only Namespace Drift Twin evidence refreshed.",
+                {
+                    "actor_id": actor_id,
+                    "status": assessment.get("status"),
+                    "material": material,
+                    "change_count": len(assessment.get("changes") or []),
+                    "rules_version": assessment.get("rules_version"),
+                },
+            )
+            if material and previous != "superseded":
+                self._append_event_in_session(
+                    session,
+                    twin_id,
+                    "decision_superseded_by_drift",
+                    "Material drift superseded prior execution eligibility.",
+                    {
+                        "from_state": previous,
+                        "to_state": "superseded",
+                        "drift_status": assessment.get("status"),
+                        "current_hash": (assessment.get("current_capture") or {}).get("hash"),
+                    },
+                )
+            return self._run_dict(row)
+
+    def record_runtime_behavior(
+        self,
+        twin_id: str,
+        *,
+        assessment: dict[str, Any],
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Persist runtime evidence without granting or rewriting decision authority."""
+        with self._event_lock, self.sessions.begin() as session:
+            row = session.scalar(
+                select(NamespaceTwinRunRow)
+                .where(NamespaceTwinRunRow.twin_id == twin_id)
+                .with_for_update()
+            )
+            if not row:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            merged = dict(row.facts_redacted or {})
+            merged["runtime_behavior_twin"] = redact_value(assessment)
+            merged["runtime_execution_effect"] = str(
+                assessment.get("execution_effect") or "require_review"
+            )
+            modes = dict(merged.get("module_modes") or {})
+            modes["runtime-behavior"] = "real_core"
+            merged["module_modes"] = modes
+            row.facts_redacted = merged
+            row.updated_at = datetime.now(UTC)
+            row.row_version += 1
+            self._append_event_in_session(
+                session,
+                twin_id,
+                "runtime_behavior_refreshed",
+                "Read-only Runtime Behavior Twin evidence refreshed.",
+                {
+                    "actor_id": actor_id,
+                    "risk": assessment.get("risk"),
+                    "health": (assessment.get("current_health") or {}).get("status"),
+                    "execution_effect": assessment.get("execution_effect"),
+                    "rules_version": assessment.get("rules_version"),
+                    "model_authority": False,
+                },
+            )
+            return self._run_dict(row)
+
+    def record_release_note_validation(
+        self,
+        twin_id: str,
+        *,
+        validation: dict[str, Any],
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Persist editorial validation facts without changing execution authority."""
+        with self._event_lock, self.sessions.begin() as session:
+            row = session.scalar(
+                select(NamespaceTwinRunRow)
+                .where(NamespaceTwinRunRow.twin_id == twin_id)
+                .with_for_update()
+            )
+            if not row:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            merged = dict(row.facts_redacted or {})
+            merged["release_note_validation"] = redact_value(validation)
+            modes = dict(merged.get("module_modes") or {})
+            modes["release-note-validation"] = "real_core"
+            merged["module_modes"] = modes
+            row.facts_redacted = merged
+            row.updated_at = datetime.now(UTC)
+            row.row_version += 1
+            self._append_event_in_session(
+                session,
+                twin_id,
+                "release_note_validation_completed",
+                "Deterministic Release Note Validation Twin completed.",
+                {
+                    "actor_id": actor_id,
+                    "artifact_id": validation.get("release_note_artifact_id"),
+                    "artifact_hash": validation.get("release_note_artifact_hash"),
+                    "status": validation.get("status"),
+                    "claim_counts": validation.get("claim_counts") or {},
+                    "prompt_hash": (validation.get("extraction") or {}).get("prompt_hash"),
+                    "input_hash": (validation.get("extraction") or {}).get("input_hash"),
+                    "model_authority": False,
+                    "execution_eligibility_effect": "none",
+                },
+            )
+            return self._run_dict(row)
     def list_events(
         self, twin_id: str, *, limit: int = 100, offset: int = 0
     ) -> tuple[list[dict[str, Any]], int]:

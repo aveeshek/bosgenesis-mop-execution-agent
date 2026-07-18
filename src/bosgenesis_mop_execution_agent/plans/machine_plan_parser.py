@@ -25,6 +25,13 @@ STEP_METADATA_KEYS = {
     "install_timeout",
     "wait",
     "atomic",
+    "current_revision",
+    "previous_revision",
+    "revision",
+    "forward_step_id",
+    "forward_step_ids",
+    "reverts_step_id",
+    "rollback_for",
 }
 
 

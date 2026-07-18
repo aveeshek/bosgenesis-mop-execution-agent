@@ -54,6 +54,7 @@ config:
   metricsEnabled: "true"
   langfuseEnabled: "false"
   k8sInspectorMcpEndpoint: "http://bosgenesis-k8s-inspector-mcp.bosgenesis.svc.cluster.local:8080"
+  namespaceTwinLiveCollectionEnabled: "true"
   helmManagerMcpEndpoint: "http://bosgenesis-helm-manager-mcp.bosgenesis.svc.cluster.local:8080"
   helmManagerRestTimeoutSeconds: "960"
   helmManagerOperationTimeout: "15m"
