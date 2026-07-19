@@ -368,15 +368,17 @@ class WorkerRuntime:
             ),
             f"{step.type.value}:{step.step_id}",
         )
-        fingerprint = command_fingerprint(
+        mutation_command = next(
+            (
+                str(item.get("command"))
+                for item in step.commands
+                if item.get("mutating") is True and item.get("command")
+            ),
             dry_run_command,
-            {
-                "target_namespace": job.target_namespace,
-                "phase_id": phase.phase_id,
-                "step_id": step.step_id,
-                "manifest_refs": sorted(step.manifest_refs),
-                "values_refs": sorted(step.values_refs),
-            },
+        )
+        fingerprint = command_fingerprint(
+            mutation_command,
+            {"step_type": step.type.value},
         )
         now = utc_now()
         running_step = step.model_copy(

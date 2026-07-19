@@ -28,6 +28,7 @@ class NamespaceTwinCreateRequest(BaseModel):
 
 class NamespaceTwinDryRunEvidenceRequest(BaseModel):
     dry_run_job_id: str = Field(min_length=1, max_length=200)
+    authoritative_dry_run_job_id: str | None = Field(default=None, max_length=200)
     bundle_hash: str | None = Field(default=None, min_length=64, max_length=64)
     input_hash: str | None = Field(default=None, min_length=64, max_length=64)
     command_fingerprint_hash: str | None = Field(default=None, min_length=64, max_length=64)
@@ -72,6 +73,26 @@ class NamespaceTwinReplayResultRequest(BaseModel):
     cleanup_status: str = Field(min_length=1, max_length=80)
     evidence_refs: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
     limitations: list[str] = Field(default_factory=list, max_length=50)
+
+
+class NamespaceTwinExecutionLinkRequest(BaseModel):
+    decision_version: int = Field(ge=1)
+    gate_hash: str = Field(min_length=64, max_length=64)
+    bundle_hash: str = Field(min_length=64, max_length=64)
+    input_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    target_namespace: str = Field(min_length=1, max_length=253)
+    dry_run_job_id: str = Field(min_length=1, max_length=200)
+    authoritative_dry_run_job_id: str | None = Field(default=None, max_length=200)
+    command_fingerprint_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    approval_id: str | None = Field(default=None, max_length=300)
+    approval_status: str = Field(default="not_required", max_length=80)
+    execution_id: str = Field(min_length=1, max_length=300)
+    execution_status: str = Field(min_length=1, max_length=80)
+    validation_status: str | None = Field(default=None, max_length=80)
+    report_bundle_id: str | None = Field(default=None, max_length=500)
+    rollback_status: str | None = Field(default=None, max_length=80)
+    cleanup_status: str | None = Field(default=None, max_length=80)
+    outcome_comparison: dict[str, Any] = Field(default_factory=dict)
 
 
 def get_namespace_twin_service(request: Request) -> NamespaceTwinService:
@@ -472,6 +493,26 @@ async def record_namespace_twin_mop_replay(
                 actor_id=actor_id,
             ),
             "Approved isolated Namespace Twin MoP replay evidence recorded.",
+        )
+    except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
+        return _error(exc)
+
+
+@router.post("/{twin_id}/execution-links")
+async def record_namespace_twin_execution_link(
+    twin_id: str,
+    payload: NamespaceTwinExecutionLinkRequest,
+    service: NamespaceTwinServiceDep,
+    actor_id: ActorDep,
+) -> JSONResponse:
+    try:
+        return _success(
+            service.record_execution_link(
+                twin_id,
+                payload.model_dump(mode="json", exclude_none=True),
+                actor_id=actor_id,
+            ),
+            "Bundle execution outcome linked without changing the terminal twin decision.",
         )
     except (NamespaceTwinError, NamespaceTwinPersistenceError) as exc:
         return _error(exc)

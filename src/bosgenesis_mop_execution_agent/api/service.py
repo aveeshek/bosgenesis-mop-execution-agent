@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -187,6 +188,14 @@ class MopExecutionApiService:
     def register_bundle(self, payload: dict[str, Any]) -> dict[str, Any]:
         bundle_id = payload.get("bundle_id") or new_id("bundle")
         source = payload.get("source") or {"type": "local_path", "value": ""}
+        try:
+            source = _materialize_uploaded_bundle_source(source)
+        except ValueError as exc:
+            return self._error(
+                str(exc),
+                code="BUNDLE_UPLOAD_INVALID",
+                bundle_id=str(bundle_id),
+            )
         target_namespace = str(payload.get("target_namespace") or "")
         self._bundles[bundle_id] = {
             "bundle_id": bundle_id,
@@ -1791,6 +1800,39 @@ class MopExecutionApiService:
             "next_required_decision": None,
             "redaction_applied": True,
         }
+
+
+def _materialize_uploaded_bundle_source(source: Any) -> Any:
+    if not isinstance(source, dict) or source.get("type") != "uploaded_archive":
+        return source
+    encoded = source.get("archive_base64")
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("uploaded_archive_requires_archive_base64")
+    max_bytes = int(
+        os.getenv("MOP_EXECUTION_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))
+    )
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("uploaded_archive_base64_invalid") from exc
+    if not content:
+        raise ValueError("uploaded_archive_empty")
+    if len(content) > max_bytes:
+        raise ValueError(f"uploaded_archive_too_large:{len(content)}")
+    expected_size = source.get("size_bytes")
+    if expected_size is not None and int(expected_size) != len(content):
+        raise ValueError("uploaded_archive_size_mismatch")
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    expected_sha256 = str(source.get("sha256") or "").strip().lower()
+    if expected_sha256 and expected_sha256 != actual_sha256:
+        raise ValueError("uploaded_archive_sha256_mismatch")
+    filename = Path(str(source.get("filename") or "mop-bundle.zip")).name
+    if not filename.lower().endswith(".zip"):
+        filename = f"{filename}.zip"
+    root = Path(tempfile.mkdtemp(prefix="mop-exec-upload-"))
+    archive = root / filename
+    archive.write_bytes(content)
+    return {"type": "uploaded_zip", "value": str(archive)}
 
 
 def capabilities_payload() -> dict[str, Any]:

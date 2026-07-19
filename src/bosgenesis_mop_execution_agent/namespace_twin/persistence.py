@@ -617,6 +617,64 @@ class NamespaceTwinRepository:
             )
             return self._run_dict(row)
 
+    def record_execution_link(
+        self,
+        twin_id: str,
+        *,
+        link: dict[str, Any],
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Append execution relationships without modifying the immutable decision record."""
+        with self._event_lock, self.sessions.begin() as session:
+            row = session.scalar(
+                select(NamespaceTwinRunRow)
+                .where(NamespaceTwinRunRow.twin_id == twin_id)
+                .with_for_update()
+            )
+            if not row:
+                raise NamespaceTwinPersistenceError(
+                    "twin_not_found", f"Namespace twin {twin_id} was not found.", status_code=404
+                )
+            merged = dict(row.facts_redacted or {})
+            links = list(merged.get("execution_links") or [])
+            execution_id = str(link.get("execution_id") or "")
+            sanitized = redact_value({**link, "linked_by": actor_id})
+            replaced = False
+            for index, item in enumerate(links):
+                if str(item.get("execution_id") or "") == execution_id:
+                    links[index] = {**item, **sanitized}
+                    replaced = True
+                    break
+            if not replaced:
+                links.append(sanitized)
+            merged.update(
+                {
+                    "execution_links": links,
+                    "execution_id": execution_id,
+                    "execution_status": sanitized.get("execution_status"),
+                    "approval_id": sanitized.get("approval_id"),
+                    "approval_status": sanitized.get("approval_status"),
+                    "latest_execution_linked_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            row.facts_redacted = merged
+            row.updated_at = datetime.now(UTC)
+            row.row_version += 1
+            self._append_event_in_session(
+                session,
+                twin_id,
+                "execution_linked",
+                "Bundle execution outcome linked to the immutable Namespace Twin decision.",
+                {
+                    "execution_id": execution_id,
+                    "execution_status": sanitized.get("execution_status"),
+                    "validation_status": sanitized.get("validation_status"),
+                    "gate_hash": sanitized.get("gate_hash"),
+                    "actor_id": actor_id,
+                },
+            )
+            return self._run_dict(row)
+
     def record_drift(
         self,
         twin_id: str,

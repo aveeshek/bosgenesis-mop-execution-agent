@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import zipfile
+from io import BytesIO
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from bosgenesis_mop_execution_agent.api.app import create_app
@@ -65,12 +71,50 @@ def test_artifact_bundle_job_control_and_retrieval_endpoints() -> None:
     plan = client.get(f"/v1/execution-jobs/{job_id}/plan").json()["data"]["plan"]
     assert plan["phases"][0]["phase_id"] == "apply_configmaps"
     assert client.get(f"/v1/execution-jobs/{job_id}/observations").json()["ok"] is True
+    dry_run_evidence = client.get(
+        f"/v1/execution-jobs/{job_id}/dry-run-evidence"
+    ).json()
+    assert dry_run_evidence["ok"] is True
+    assert dry_run_evidence["data"]["dry_run_evidence"]["authoritative"] is True
     assert client.get(f"/v1/execution-jobs/{job_id}/events").json()["ok"] is True
     assert client.get(f"/v1/execution-jobs/{job_id}/audit-events").json()["ok"] is True
     assert client.get(f"/v1/execution-jobs/{job_id}/memory-context").json()["ok"] is True
     stream = client.get(f"/v1/execution-jobs/{job_id}/stream")
     assert stream.status_code == 200
     assert "event: snapshot" in stream.text
+
+
+def test_inline_uploaded_archive_is_materialized_and_validated() -> None:
+    source_root = Path("tests/fixtures/sample_mop_bundle")
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(item for item in source_root.rglob("*") if item.is_file()):
+            archive.writestr(path.relative_to(source_root).as_posix(), path.read_bytes())
+    content = buffer.getvalue()
+    client = TestClient(create_app())
+
+    registered = client.post(
+        "/v1/artifact-bundles/from-upload",
+        json={
+            "source": {
+                "type": "uploaded_archive",
+                "filename": "sample-mop.zip",
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "archive_base64": base64.b64encode(content).decode("ascii"),
+            },
+            "target_namespace": "sample-target",
+        },
+    )
+
+    assert registered.status_code == 200
+    payload = registered.json()
+    assert payload["data"]["source"]["type"] == "uploaded_zip"
+    assert "archive_base64" not in payload["data"]["source"]
+    validated = client.post(
+        f"/v1/artifact-bundles/{payload['bundle_id']}/validate", json={}
+    ).json()
+    assert validated["data"]["valid"] is True
 
 
 def test_start_endpoint_queues_runtime_work_without_inline_execution(monkeypatch) -> None:

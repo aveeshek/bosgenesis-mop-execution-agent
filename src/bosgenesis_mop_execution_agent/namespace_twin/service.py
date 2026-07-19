@@ -1,4 +1,4 @@
-"""Real, provisional namespace twin lifecycle foundation."""
+﻿"""Real, provisional namespace twin lifecycle foundation."""
 
 from __future__ import annotations
 
@@ -1046,6 +1046,69 @@ class NamespaceTwinService:
                 ),
             },
             "redacted": True,
+        }
+
+    def record_execution_link(
+        self,
+        twin_id: str,
+        payload: dict[str, Any],
+        *,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Link execution evidence after rechecking immutable twin identity facts."""
+        core = self.repository.get_run(twin_id)
+        facts = dict(core.get("facts") or {})
+        errors: list[str] = []
+        if core.get("decision_is_final") is not True:
+            errors.append("Namespace Twin decision must be final before execution linkage.")
+        if int(payload.get("decision_version") or 0) != int(core.get("decision_version") or 0):
+            errors.append("Namespace Twin decision version changed before execution linkage.")
+        if str(payload.get("bundle_hash") or "") != str(core.get("bundle_hash") or ""):
+            errors.append("Execution bundle hash does not match the Namespace Twin.")
+        if payload.get("input_hash") and str(payload.get("input_hash")) != str(
+            core.get("input_hash") or ""
+        ):
+            errors.append("Execution input hash does not match the Namespace Twin.")
+        if str(payload.get("target_namespace") or "") != str(core.get("target_namespace") or ""):
+            errors.append("Execution target namespace does not match the Namespace Twin.")
+        canonical_dry_run = str(facts.get("dry_run_job_id") or "")
+        authoritative_dry_run = str(payload.get("authoritative_dry_run_job_id") or "")
+        if canonical_dry_run and authoritative_dry_run != canonical_dry_run:
+            errors.append("Authoritative dry-run identity does not match the Namespace Twin.")
+        canonical_fingerprint = str(facts.get("command_fingerprint_hash") or "")
+        if (
+            canonical_fingerprint
+            and payload.get("command_fingerprint_hash")
+            and str(payload.get("command_fingerprint_hash")) != canonical_fingerprint
+        ):
+            errors.append("Execution command fingerprint does not match the Namespace Twin.")
+        if errors:
+            raise NamespaceTwinError(
+                "execution_link_identity_mismatch",
+                "Execution outcome cannot be linked because canonical twin facts changed.",
+                status_code=409,
+                details={"errors": errors, "twin_id": twin_id},
+            )
+        link = {
+            **payload,
+            "twin_id": twin_id,
+            "pre_execution_decision": core.get("decision"),
+            "pre_execution_decision_version": core.get("decision_version"),
+            "linked_at": datetime.now(UTC).isoformat(),
+        }
+        updated = self.repository.record_execution_link(
+            twin_id,
+            link=link,
+            actor_id=actor_id,
+        )
+        return {
+            "schema_version": updated["schema_version"],
+            "twin_id": twin_id,
+            "decision": updated.get("decision"),
+            "decision_version": updated.get("decision_version"),
+            "decision_is_final": updated.get("decision_is_final"),
+            "execution_link": link,
+            "relationships": self._project(updated).get("relationships"),
         }
 
     def report(self, twin_id: str) -> dict[str, Any]:

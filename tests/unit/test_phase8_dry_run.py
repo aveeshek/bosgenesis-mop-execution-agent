@@ -26,6 +26,7 @@ from bosgenesis_mop_execution_agent.persistence import (
 )
 from bosgenesis_mop_execution_agent.persistence.repositories import JsonExecutionRepository
 from bosgenesis_mop_execution_agent.plans.machine_plan_parser import parse_machine_plan
+from bosgenesis_mop_execution_agent.policy.command_fingerprint import command_fingerprint
 from bosgenesis_mop_execution_agent.runtime import DryRunExecutor, InMemoryJobQueue, WorkerRuntime
 
 
@@ -56,6 +57,15 @@ def test_dry_run_only_e2e_uses_kubernetes_server_side_dry_run_sample_bundle(
     assert stored_step.state == StepState.DRY_RUN_SUCCEEDED
     assert stored_step.command_fingerprint is not None
     assert stored_step.command_fingerprint.startswith("sha256:")
+    mutation_command = next(
+        str(command["command"])
+        for command in stored_step.commands
+        if command.get("mutating") is True
+    )
+    assert stored_step.command_fingerprint == command_fingerprint(
+        mutation_command,
+        {"step_type": stored_step.type.value},
+    )
     dry_run_observations = [
         observation
         for observation in repo.get_observations(job.job_id)
