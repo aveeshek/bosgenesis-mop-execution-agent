@@ -543,7 +543,7 @@ def _has_inferred_helm_change(
                 f"{command.kind} {command.command}" for command in step.commands
             ).casefold()
             is_helm_step = "helm" in str(step.type).casefold() or "helm" in command_text
-            if step.inference and is_helm_step:
+            if _is_inferred_provenance(step.inference) and is_helm_step:
                 inferred_helm_steps.append(step)
     if not inferred_helm_steps:
         return False
@@ -569,6 +569,13 @@ def _has_inferred_helm_change(
     rendered_evidence = bool(changed_releases & rendered_releases)
     return not (explicit_values and rendered_evidence)
 
+
+def _is_inferred_provenance(inference: dict[str, Any] | None) -> bool:
+    if not inference:
+        return False
+
+    label = str(inference.get("label") or "").strip().casefold()
+    return label not in {"observed", "verified", "authoritative", "explicit"}
 
 def _decision_projection(
     *,

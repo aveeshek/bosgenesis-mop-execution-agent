@@ -281,6 +281,56 @@ def test_explicit_rendered_helm_and_values_do_not_score_as_inferred() -> None:
     assert rule["contribution"] == 0
 
 
+def test_observed_helm_provenance_does_not_score_as_inferred() -> None:
+    bundle = load_and_validate_bundle(_source(), TARGET)
+    phase = bundle.machine_plan.phases[0]
+    observed_step = phase.steps[0].model_copy(
+        update={
+            "type": "helm_upgrade",
+            "inference": {
+                "label": "observed",
+                "confidence": "medium",
+                "rationale": "Chart and values were collected from explicit release evidence.",
+            },
+            "values_refs": ["values/values-release.yaml"],
+        }
+    )
+    plan = bundle.machine_plan.model_copy(
+        update={"phases": [phase.model_copy(update={"steps": [observed_step]})]}
+    )
+    observed_bundle = bundle.model_copy(update={"machine_plan": plan})
+
+    assessment = evaluate_policy_twin(
+        bundle=observed_bundle,
+        planned_resources=[],
+        deltas=[
+            {
+                "kind": "ConfigMap",
+                "name": "release-config",
+                "namespace": TARGET,
+                "action": "create",
+                "canonical_diff": "{}",
+                "evidence_refs": ["values/values-release.yaml"],
+                "helm_release": "release",
+            }
+        ],
+        snapshot=LiveSnapshot(available=True, complete_kinds={"ConfigMap"}),
+        provenance={"artifact_index_present": True},
+        graph_summary={"missing": 0},
+        explicit_deletes=[],
+        input_hash="f" * 64,
+        target_namespace=TARGET,
+        evaluated_at=datetime(2026, 7, 22, tzinfo=UTC),
+    )
+    rule = next(
+        item
+        for item in assessment["risk_axis"]["contributions"]
+        if item["rule"] == "inferred_chart_or_value"
+    )
+
+    assert rule["matched"] is False
+    assert rule["contribution"] == 0
+
 def test_machine_plan_rollback_commands_prevent_false_missing_rollback() -> None:
     bundle = load_and_validate_bundle(_source(), TARGET)
     phase = bundle.machine_plan.phases[0]
