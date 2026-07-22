@@ -11,6 +11,7 @@ from bosgenesis_mop_execution_agent.artifacts.models import (
     BundleSource,
     BundleSourceType,
     LoadedManifest,
+    LoadedValuesFile,
 )
 from bosgenesis_mop_execution_agent.namespace_twin.delta import LiveSnapshot
 from bosgenesis_mop_execution_agent.namespace_twin.models import (
@@ -166,7 +167,12 @@ def test_pvc_risk_is_disabled_by_default_and_can_be_enabled() -> None:
 def test_inferred_helm_values_only_score_an_installed_release_delta() -> None:
     bundle = load_and_validate_bundle(_source(), TARGET)
     phase = bundle.machine_plan.phases[0]
-    inferred_step = phase.steps[0].model_copy(update={"inference": {"source": "chart"}})
+    inferred_step = phase.steps[0].model_copy(
+        update={
+            "type": "helm_upgrade",
+            "inference": {"source": "chart"},
+        }
+    )
     inferred_plan = bundle.machine_plan.model_copy(
         update={"phases": [phase.model_copy(update={"steps": [inferred_step]})]}
     )
@@ -210,6 +216,69 @@ def test_inferred_helm_values_only_score_an_installed_release_delta() -> None:
     assert raw_rule["contribution"] == 0
     assert installed_rule["matched"] is True
     assert installed_rule["contribution"] == 20
+
+
+def test_explicit_rendered_helm_and_values_do_not_score_as_inferred() -> None:
+    bundle = load_and_validate_bundle(_source(), TARGET)
+    phase = bundle.machine_plan.phases[0]
+    values_path = "deployment-artifacts/helm/values.yaml"
+    inferred_step = phase.steps[0].model_copy(
+        update={
+            "type": "helm_upgrade",
+            "inference": {"source": "chart"},
+            "values_refs": [values_path],
+        }
+    )
+    plan = bundle.machine_plan.model_copy(
+        update={"phases": [phase.model_copy(update={"steps": [inferred_step]})]}
+    )
+    explicit_bundle = bundle.model_copy(
+        update={
+            "machine_plan": plan,
+            "values_files": [LoadedValuesFile(path=values_path, content={})],
+        }
+    )
+    assessment = evaluate_policy_twin(
+        bundle=explicit_bundle,
+        planned_resources=[
+            {
+                "payload_redacted": {
+                    "source": "helm_rendered_manifest",
+                    "manifest": {
+                        "metadata": {
+                            "labels": {"app.kubernetes.io/instance": "installed-release"}
+                        }
+                    },
+                }
+            }
+        ],
+        deltas=[
+            {
+                "kind": "ConfigMap",
+                "name": "rendered-config",
+                "namespace": TARGET,
+                "action": "create",
+                "canonical_diff": "{}",
+                "evidence_refs": ["rendered.yaml"],
+                "helm_release": "installed-release",
+            }
+        ],
+        snapshot=LiveSnapshot(available=True, complete_kinds={"ConfigMap"}),
+        provenance={"artifact_index_present": True},
+        graph_summary={"missing": 0},
+        explicit_deletes=[],
+        input_hash="e" * 64,
+        target_namespace=TARGET,
+        evaluated_at=datetime(2026, 7, 22, tzinfo=UTC),
+    )
+    rule = next(
+        item
+        for item in assessment["risk_axis"]["contributions"]
+        if item["rule"] == "inferred_chart_or_value"
+    )
+
+    assert rule["matched"] is False
+    assert rule["contribution"] == 0
 
 
 def test_machine_plan_rollback_commands_prevent_false_missing_rollback() -> None:

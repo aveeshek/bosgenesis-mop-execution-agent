@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -137,6 +137,23 @@ def test_authoritative_dry_run_attaches_filters_and_finalizes(tmp_path, monkeypa
     assert dry_run["data"]["snapshot"]["hash"]
     assert dry_run["data"]["automatic_instruction_submission"] is False
     assert dry_run["data"]["automatic_mutation_retry"] is False
+    final_policy = final["foundation_facts"]["policy_twin"]
+    dry_run_check = next(
+        item
+        for item in final_policy["evidence_axis"]["checks"]
+        if item["code"] == "authoritative_dry_run"
+    )
+    stale_evidence_risk = next(
+        item
+        for item in final_policy["risk_axis"]["contributions"]
+        if item["rule"] == "partial_or_stale_live_evidence"
+    )
+    assert dry_run_check["satisfied"] is True
+    assert "authoritative_dry_run" not in final_policy["evidence_axis"]["missing"]
+    remaining_missing = final_policy["evidence_axis"]["missing"]
+    assert stale_evidence_risk["matched"] is bool(remaining_missing)
+    assert stale_evidence_risk["contribution"] == (20 if remaining_missing else 0)
+    assert final_policy["decision_projection"]["decision_is_final"] is True
 
     filtered = twin_service.dry_run(
         created["twin_id"],

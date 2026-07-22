@@ -221,6 +221,52 @@ def test_dependency_builder_ignores_non_mapping_generated_references() -> None:
     )
 
 
+def test_namespace_default_service_account_is_present_dependency() -> None:
+    bundle, manifests = _graph_bundle()
+    deployment = next(item for item in manifests if item.kind == "Deployment")
+    deployment.content["spec"]["template"]["spec"]["serviceAccountName"] = "default"
+
+    nodes, edges, findings, _summary = build_dependency_graph(
+        bundle, [_record(manifest) for manifest in manifests]
+    )
+
+    default_account = next(
+        node
+        for node in nodes
+        if node["kind"] == "ServiceAccount" and node["name"] == "default"
+    )
+    assert default_account["payload_redacted"]["status"] == "present"
+    assert default_account["payload_redacted"]["source"] == "kubernetes_namespace_default"
+    assert any(
+        edge["edge_type"] == "service_account_ref"
+        and edge["source_identity"] == default_account["stable_identity"]
+        for edge in edges
+    )
+    assert not any(
+        finding["code"] == "MISSING_DEPENDENCY" and "default" in finding["message"]
+        for finding in findings
+    )
+
+
+def test_ignored_manifest_ref_does_not_reappear_as_missing_plan_dependency() -> None:
+    source = BundleSource(type=BundleSourceType.LOCAL_PATH, value=str(FIXTURE))
+    bundle = load_and_validate_bundle(source, TARGET)
+    ignored = "generated/configmap-sample-app.yaml"
+
+    nodes, _edges, findings, summary = build_dependency_graph(
+        bundle,
+        [],
+        ignored_manifest_refs={ignored},
+    )
+
+    assert not any(
+        node["kind"] == "ManifestArtifact" and node["name"] == ignored
+        for node in nodes
+    )
+    assert not any(ignored in finding["message"] for finding in findings)
+    assert summary["missing"] == 0
+
+
 def test_twin_planning_includes_intended_helm_service_and_excludes_platform_configmaps(
     tmp_path,
 ) -> None:

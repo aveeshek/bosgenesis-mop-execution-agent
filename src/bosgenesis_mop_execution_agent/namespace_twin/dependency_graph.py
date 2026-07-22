@@ -41,6 +41,8 @@ def stable_edge_id(source: str, target: str, edge_type: str) -> str:
 def build_dependency_graph(
     bundle: ArtifactBundle,
     resources: list[dict[str, Any]],
+    *,
+    ignored_manifest_refs: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     """Return persisted nodes, edges, graph findings, and deterministic summary counts."""
     nodes = [deepcopy(item) for item in resources]
@@ -128,6 +130,19 @@ def build_dependency_graph(
                 },
             )
             return identity, "uncertain"
+        if kind == "ServiceAccount" and name == "default" and namespace:
+            return (
+                add_synthetic(
+                    kind,
+                    name,
+                    namespace,
+                    status="present",
+                    source="kubernetes_namespace_default",
+                    evidence_refs=evidence_refs,
+                    details={"provided_by": "kubernetes_namespace"},
+                ),
+                "deterministic",
+            )
         return (
             add_synthetic(
                 kind,
@@ -284,7 +299,13 @@ def build_dependency_graph(
 
     _add_selector_edges(nodes, by_key, add_synthetic, add_edge, bundle.target_namespace)
     _add_crd_edges(nodes, resolve, add_edge)
-    _add_plan_edges(bundle, path_to_identities, add_synthetic, add_edge)
+    _add_plan_edges(
+        bundle,
+        path_to_identities,
+        add_synthetic,
+        add_edge,
+        ignored_manifest_refs=ignored_manifest_refs or set(),
+    )
 
     findings = _graph_findings(nodes, edges)
     statuses = [_node_status(item) for item in nodes]
@@ -423,6 +444,8 @@ def _add_plan_edges(
     path_to_identities: dict[str, list[str]],
     add_synthetic: Any,
     add_edge: Any,
+    *,
+    ignored_manifest_refs: set[str],
 ) -> None:
     phase_ids: dict[str, str] = {}
     for phase in bundle.machine_plan.phases:
@@ -459,6 +482,8 @@ def _add_plan_edges(
         for step in phase.steps:
             for manifest_ref in step.manifest_refs:
                 normalized = str(manifest_ref).replace("\\", "/")
+                if normalized in ignored_manifest_refs:
+                    continue
                 identities = path_to_identities.get(normalized, [])
                 if not identities:
                     missing = add_synthetic(

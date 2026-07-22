@@ -12,5 +12,5 @@ def test_healthz_returns_openapi_health_shape() -> None:
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["service"] == "bosgenesis-mop-execution-agent"
-    assert payload["version"] == "0.1.1"
+    assert payload["version"] == "0.1.2"
     assert "timestamp" in payload

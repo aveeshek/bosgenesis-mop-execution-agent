@@ -119,7 +119,8 @@ def build_report(twin: dict[str, Any], events: list[dict[str, Any]]) -> dict[str
             "resource_count": int(facts.get("resource_count") or 0),
             "edge_count": int(facts.get("edge_count") or 0),
             "finding_count": int(facts.get("finding_count") or 0),
-            "policy_verdict": policy.get("verdict") or "not_available",
+            "policy_verdict": (policy.get("policy_axis") or {}).get("verdict")
+            or "not_available",
             "dry_run_status": dry_run.get("qualification_status")
             or dry_run.get("status")
             or "not_run",

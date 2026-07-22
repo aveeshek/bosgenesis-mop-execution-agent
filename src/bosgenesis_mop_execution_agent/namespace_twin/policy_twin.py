@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -162,6 +163,7 @@ def evaluate_policy_twin(
     risk_axis = _risk_axis(
         deltas=deltas,
         bundle=bundle,
+        planned_resources=planned_resources,
         explicit_deletes=explicit_deletes,
         evidence_axis=evidence_axis,
         pvc_risk_enabled=pvc_risk_enabled,
@@ -208,6 +210,142 @@ def evaluate_policy_twin(
         "model_authority": False,
     }
 
+
+def finalize_policy_twin(
+    policy_twin: dict[str, Any],
+    *,
+    dry_run_evidence: dict[str, Any],
+    evaluated_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Recalculate all deterministic axes after authoritative dry-run attachment."""
+    finalized = deepcopy(policy_twin)
+    status = str(dry_run_evidence.get("status") or "partial").lower()
+    dry_run_passed = status == "passed"
+
+    evidence_axis = deepcopy(finalized.get("evidence_axis") or {})
+    checks = list(evidence_axis.get("checks") or [])
+    dry_run_refs = [
+        str(value)
+        for value in (
+            dry_run_evidence.get("dry_run_job_id"),
+            dry_run_evidence.get("command_fingerprint_hash"),
+        )
+        if value
+    ]
+    replacement = _evidence_check(
+        "authoritative_dry_run",
+        dry_run_passed,
+        (
+            "Authoritative dry-run evidence completed successfully and was verified."
+            if dry_run_passed
+            else f"Authoritative dry-run evidence completed with status {status}."
+        ),
+        dry_run_refs,
+    )
+    replaced = False
+    for index, check in enumerate(checks):
+        if check.get("code") == "authoritative_dry_run":
+            checks[index] = replacement
+            replaced = True
+            break
+    if not replaced:
+        checks.append(replacement)
+
+    missing = [str(item.get("code")) for item in checks if not item.get("satisfied")]
+    essential_missing = "bundle_integrity" in missing
+    completeness = "unavailable" if essential_missing else "complete" if not missing else "partial"
+    freshness = str(evidence_axis.get("freshness") or "unavailable")
+    classification = "stale" if freshness == "stale" else completeness
+    evidence_axis.update(
+        {
+            "classification": classification,
+            "completeness": completeness,
+            "required_count": len(checks),
+            "present_count": len(checks) - len(missing),
+            "missing": missing,
+            "checks": checks,
+            "contributions": [
+                {
+                    "axis": "evidence",
+                    "rule": item["code"],
+                    "matched": not item["satisfied"],
+                    "effect": "degrade" if not item["satisfied"] else "satisfied",
+                    "contribution": 0,
+                    "reason": item["summary"],
+                    "evidence_refs": item["evidence_refs"],
+                }
+                for item in checks
+            ],
+        }
+    )
+
+    risk_axis = deepcopy(finalized.get("risk_axis") or {})
+    risk_contributions = list(risk_axis.get("contributions") or [])
+    for contribution in risk_contributions:
+        if contribution.get("rule") != "partial_or_stale_live_evidence":
+            continue
+        matched = classification in {"partial", "stale", "unavailable"}
+        weight = int(contribution.get("weight") or 20)
+        contribution.update(
+            {
+                "matched": matched,
+                "effect": "increase" if matched else "none",
+                "contribution": weight if matched else 0,
+                "reason": _risk_reason("partial_or_stale_live_evidence", matched),
+                "evidence_refs": [f"evidence:{item}" for item in missing],
+            }
+        )
+        break
+    raw_score = sum(int(item.get("contribution") or 0) for item in risk_contributions)
+    score = min(raw_score, 100)
+    level = (
+        "low" if score <= 29 else "medium" if score <= 69 else "high" if score < 90 else "critical"
+    )
+    risk_axis.update(
+        {
+            "level": level,
+            "score": score,
+            "raw_score": raw_score,
+            "contributions": risk_contributions,
+        }
+    )
+
+    policy_axis = deepcopy(finalized.get("policy_axis") or {})
+    decision_projection = _decision_projection(
+        policy_axis=policy_axis,
+        evidence_axis=evidence_axis,
+        risk_axis=risk_axis,
+        authoritative_dry_run_failed=not dry_run_passed,
+    )
+    decision_projection.update({"preliminary": False, "decision_is_final": True})
+    axes_hash = _hash(
+        {
+            "policy": policy_axis,
+            "evidence": evidence_axis,
+            "risk": risk_axis,
+            "decision": decision_projection,
+        }
+    )
+    decision_projection["axes_hash"] = axes_hash
+    findings = list(finalized.get("findings") or [])
+    finalized.update(
+        {
+            "evaluated_at": (evaluated_at or datetime.now(UTC)).isoformat(),
+            "evidence_axis": evidence_axis,
+            "risk_axis": risk_axis,
+            "decision_projection": decision_projection,
+            "rule_contributions": [
+                *_policy_contributions(findings),
+                *evidence_axis["contributions"],
+                *risk_axis["contributions"],
+                *decision_projection["contributions"],
+            ],
+            "dry_run_job_id": dry_run_evidence.get("dry_run_job_id"),
+            "command_fingerprint_hash": dry_run_evidence.get("command_fingerprint_hash")
+            or finalized.get("command_fingerprint_hash"),
+        }
+    )
+    return finalized
 
 def _policy_axis(findings: list[dict[str, Any]]) -> dict[str, Any]:
     hard_blocks = [item for item in findings if item["effect"] == "deny"]
@@ -305,6 +443,7 @@ def _risk_axis(
     *,
     deltas: list[dict[str, Any]],
     bundle: ArtifactBundle,
+    planned_resources: list[dict[str, Any]],
     explicit_deletes: list[dict[str, Any]],
     evidence_axis: dict[str, Any],
     pvc_risk_enabled: bool,
@@ -337,9 +476,10 @@ def _risk_axis(
         ),
         "large_replica_change": any(_large_replica_change(diff) for diff in diffs),
         "missing_rollback_step": bool(active or explicit_deletes) and not _has_rollback(bundle),
-        "inferred_chart_or_value": any(row.get("helm_release") for row in active)
-        and any(
-            bool(step.inference) for phase in bundle.machine_plan.phases for step in phase.steps
+        "inferred_chart_or_value": _has_inferred_helm_change(
+            active=active,
+            bundle=bundle,
+            planned_resources=planned_resources,
         ),
         "partial_or_stale_live_evidence": evidence_axis["classification"]
         in {"partial", "stale", "unavailable"},
@@ -382,15 +522,64 @@ def _risk_axis(
     }
 
 
+def _has_inferred_helm_change(
+    *,
+    active: list[dict[str, Any]],
+    bundle: ArtifactBundle,
+    planned_resources: list[dict[str, Any]],
+) -> bool:
+    changed_releases = {
+        str(row.get("helm_release") or "").casefold()
+        for row in active
+        if row.get("helm_release")
+    }
+    if not changed_releases:
+        return False
+
+    inferred_helm_steps = []
+    for phase in bundle.machine_plan.phases:
+        for step in phase.steps:
+            command_text = " ".join(
+                f"{command.kind} {command.command}" for command in step.commands
+            ).casefold()
+            is_helm_step = "helm" in str(step.type).casefold() or "helm" in command_text
+            if step.inference and is_helm_step:
+                inferred_helm_steps.append(step)
+    if not inferred_helm_steps:
+        return False
+
+    rendered_releases: set[str] = set()
+    for resource in planned_resources:
+        payload = resource.get("payload_redacted") or {}
+        if payload.get("source") != "helm_rendered_manifest":
+            continue
+        manifest = payload.get("manifest") or {}
+        metadata = manifest.get("metadata") or {}
+        annotations = metadata.get("annotations") or {}
+        labels = metadata.get("labels") or {}
+        release = annotations.get("meta.helm.sh/release-name") or labels.get(
+            "app.kubernetes.io/instance"
+        )
+        if release:
+            rendered_releases.add(str(release).casefold())
+
+    explicit_values = bool(bundle.values_files) and all(
+        bool(step.values_refs) for step in inferred_helm_steps
+    )
+    rendered_evidence = bool(changed_releases & rendered_releases)
+    return not (explicit_values and rendered_evidence)
+
+
 def _decision_projection(
     *,
     policy_axis: dict[str, Any],
     evidence_axis: dict[str, Any],
     risk_axis: dict[str, Any],
+    authoritative_dry_run_failed: bool = False,
 ) -> dict[str, Any]:
     rules = [
         ("policy_deny_or_hard_block", policy_axis["verdict"] == "deny", "red"),
-        ("authoritative_dry_run_failed", False, "red"),
+        ("authoritative_dry_run_failed", authoritative_dry_run_failed, "red"),
         ("critical_unmitigated_risk", risk_axis["score"] >= 70, "red"),
         ("approval_required", policy_axis["verdict"] == "approval_required", "amber"),
         (

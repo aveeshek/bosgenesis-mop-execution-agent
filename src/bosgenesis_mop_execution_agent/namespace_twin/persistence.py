@@ -1087,6 +1087,7 @@ class NamespaceTwinRepository:
                 created_at=now,
             )
             session.add(decision_row)
+            row.facts_redacted = redact_value(facts)
             row.decision = decision
             row.decision_is_final = True
             row.report_hash = report_hash

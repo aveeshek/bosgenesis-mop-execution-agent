@@ -56,7 +56,10 @@ from bosgenesis_mop_execution_agent.namespace_twin.persistence import (
     NamespaceTwinPersistenceError,
     NamespaceTwinRepository,
 )
-from bosgenesis_mop_execution_agent.namespace_twin.policy_twin import evaluate_policy_twin
+from bosgenesis_mop_execution_agent.namespace_twin.policy_twin import (
+    evaluate_policy_twin,
+    finalize_policy_twin,
+)
 from bosgenesis_mop_execution_agent.namespace_twin.release_note_validation import (
     validate_release_note_claims,
 )
@@ -178,8 +181,11 @@ class NamespaceTwinService:
                 snapshot=snapshot,
                 planned_helm_installs=planned_helm_installs,
             )
+            ignored_manifest_refs = self._ignored_manifest_refs(bundle)
             resources, edges, graph_findings, graph_summary = build_dependency_graph(
-                bundle, planned_resources
+                bundle,
+                planned_resources,
+                ignored_manifest_refs=ignored_manifest_refs,
             )
             explicit_deletes = self._explicit_deletes(bundle)
             findings = self._findings(explicit_deletes) + graph_findings
@@ -732,6 +738,10 @@ class NamespaceTwinService:
         )
         merged_facts = dict(updated.get("facts") or {})
         merged_facts.update(attached_facts)
+        merged_facts["policy_twin"] = finalize_policy_twin(
+            dict(merged_facts.get("policy_twin") or {}),
+            dry_run_evidence=evidence,
+        )
         policy_projection = (merged_facts.get("policy_twin") or {}).get("decision_projection") or {}
         projected_decision = str(policy_projection.get("level") or "amber")
         if projected_decision not in {"green", "amber", "red"}:
@@ -2634,6 +2644,20 @@ class NamespaceTwinService:
         }
         canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _ignored_manifest_refs(self, bundle: ArtifactBundle) -> set[str]:
+        ignored: set[str] = set()
+        for manifest in bundle.manifests:
+            resource = self._resource_record(
+                manifest.content,
+                path=manifest.path,
+                document_index=manifest.document_index,
+                target_namespace=bundle.target_namespace,
+                source="bundle_manifest",
+            )
+            if self._excluded_configmap(resource):
+                ignored.add(Path(manifest.path).as_posix())
+        return ignored
 
     def _resources(
         self,
