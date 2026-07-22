@@ -24,6 +24,7 @@ class NamespaceTwinCreateRequest(BaseModel):
     target_cluster: str = Field(default="configured-cluster", min_length=1, max_length=253)
     idempotency_key: str | None = Field(default=None, max_length=200)
     supersedes_twin_id: str | None = Field(default=None, max_length=200)
+    run_authoritative_dry_run: bool = False
 
 
 class NamespaceTwinDryRunEvidenceRequest(BaseModel):

@@ -166,13 +166,21 @@ def build_dependency_graph(
             }
         )
 
-    for manifest in bundle.manifests:
-        namespace = (
-            None if manifest.scope == "cluster" else manifest.namespace or bundle.target_namespace
-        )
-        consumer = _manifest_identity(manifest.api_version, manifest.kind, namespace, manifest.name)
-        path_refs = [manifest.path]
-        metadata = manifest.content.get("metadata") or {}
+    # Extract dependencies from the selected Twin projection, not only from
+    # the bundle loader's original manifest list. Explicit Helm installs can
+    # add safe rendered resources to this projection, and those resources must
+    # participate in route/reference analysis as first-class planned facts.
+    for node in list(nodes):
+        payload = node.get("payload_redacted") or {}
+        if payload.get("synthetic") is True:
+            continue
+        content = payload.get("manifest") or {}
+        if not isinstance(content, dict):
+            continue
+        namespace = node.get("namespace")
+        consumer = str(node["stable_identity"])
+        path_refs = list(payload.get("evidence_refs") or [payload.get("path") or "bundle"])
+        metadata = content.get("metadata") or {}
 
         for owner in metadata.get("ownerReferences") or []:
             if not isinstance(owner, dict) or not owner.get("kind") or not owner.get("name"):
@@ -206,7 +214,7 @@ def build_dependency_graph(
                 evidence_refs=path_refs,
             )
 
-        for kind, name in _workload_references(manifest.kind, manifest.content):
+        for kind, name in _workload_references(str(node.get("kind") or ""), content):
             ref_id, confidence = resolve(kind, name, namespace, evidence_refs=path_refs)
             edge_type = {
                 "ConfigMap": "configmap_ref",
@@ -216,8 +224,8 @@ def build_dependency_graph(
             }[kind]
             add_edge(ref_id, consumer, edge_type, confidence=confidence, evidence_refs=path_refs)
 
-        if manifest.kind == "Ingress":
-            for service_name in _ingress_backends(manifest.content):
+        if node.get("kind") == "Ingress":
+            for service_name in _ingress_backends(content):
                 service_id, confidence = resolve(
                     "Service", service_name, namespace, evidence_refs=path_refs
                 )
@@ -229,10 +237,10 @@ def build_dependency_graph(
                     evidence_refs=path_refs,
                 )
 
-        if manifest.kind == "RoleBinding":
+        if node.get("kind") == "RoleBinding":
             role_ref = (
-                manifest.content.get("roleRef")
-                or manifest.content.get("spec", {}).get("roleRef")
+                content.get("roleRef")
+                or content.get("spec", {}).get("roleRef")
                 or {}
             )
             if isinstance(role_ref, dict) and role_ref.get("kind") and role_ref.get("name"):
@@ -250,8 +258,8 @@ def build_dependency_graph(
                     evidence_refs=path_refs,
                 )
             for subject in (
-                manifest.content.get("subjects")
-                or manifest.content.get("spec", {}).get("subjects")
+                content.get("subjects")
+                or content.get("spec", {}).get("subjects")
                 or []
             ):
                 if (
@@ -351,7 +359,13 @@ def _add_selector_edges(
 
 def _add_crd_edges(nodes: list[dict[str, Any]], resolve: Any, add_edge: Any) -> None:
     definitions: dict[tuple[str, str], str] = {}
-    for node in nodes:
+    # Synthetic graph nodes use the private reference.esda API group. They are
+    # graph bookkeeping, not Kubernetes custom resources, and must never cause
+    # recursive synthetic CRD dependencies.
+    for node in list(nodes):
+        payload = node.get("payload_redacted") or {}
+        if payload.get("synthetic") is True:
+            continue
         if node["kind"] != "CustomResourceDefinition":
             continue
         manifest = (node.get("payload_redacted") or {}).get("manifest") or {}
@@ -359,7 +373,7 @@ def _add_crd_edges(nodes: list[dict[str, Any]], resolve: Any, add_edge: Any) -> 
         names = spec.get("names") or {}
         if spec.get("group") and names.get("kind"):
             definitions[(str(spec["group"]), str(names["kind"]))] = node["stable_identity"]
-    for node in nodes:
+    for node in list(nodes):
         api_version = str(node.get("api_version") or "")
         group = api_version.split("/", 1)[0] if "/" in api_version else ""
         if not group or group in {
@@ -376,6 +390,7 @@ def _add_crd_edges(nodes: list[dict[str, Any]], resolve: Any, add_edge: Any) -> 
             "events.k8s.io",
             "flowcontrol.apiserver.k8s.io",
             "networking.k8s.io",
+            "reference.esda",
             "node.k8s.io",
             "policy",
             "rbac.authorization.k8s.io",
@@ -645,10 +660,6 @@ def _selector_name(selector: dict[str, Any]) -> str:
     text = ",".join(f"{key}={selector[key]}" for key in sorted(selector))
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
     return f"selector-{digest}"
-
-
-def _manifest_identity(api_version: str, kind: str, namespace: str | None, name: str) -> str:
-    return f"{api_version}:{kind}:{namespace or '_cluster'}:{name}"
 
 
 def _node_status(node: dict[str, Any]) -> str:

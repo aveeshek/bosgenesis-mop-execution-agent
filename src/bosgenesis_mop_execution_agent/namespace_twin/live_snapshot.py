@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from typing import Any, Protocol
 
 from mcp import ClientSession
@@ -13,6 +14,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from bosgenesis_mop_execution_agent.namespace_twin.delta import LiveSnapshot
 from bosgenesis_mop_execution_agent.runtime.mcp_rest_adapters import (
+    HelmManagerRestDryRunClient,
     KubernetesInspectorRestDryRunClient,
 )
 
@@ -33,10 +35,26 @@ class KubernetesLiveSnapshotCollector:
         ("Ingress", "list_ingresses", "k8s_list_ingresses"),
     )
 
-    def __init__(self, *, base_url: str, api_key: str | None, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None,
+        enabled: bool = True,
+        helm_base_url: str = "http://bosgenesis-helm-manager-mcp:8080",
+        helm_api_key: str | None = None,
+        helm_ignore_prefixes: tuple[str, ...] = ("bosgenesis-",),
+        installed_helm_releases_only: bool = True,
+    ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.enabled = enabled
+        self.helm_base_url = helm_base_url
+        self.helm_api_key = helm_api_key
+        self.helm_ignore_prefixes = tuple(
+            prefix.strip() for prefix in helm_ignore_prefixes if prefix.strip()
+        )
+        self.installed_helm_releases_only = installed_helm_releases_only
 
     @classmethod
     def from_environment(cls) -> KubernetesLiveSnapshotCollector:
@@ -52,13 +70,29 @@ class KubernetesLiveSnapshotCollector:
             ),
             api_key=os.getenv("K8S_INSPECTOR_API_KEY") or os.getenv("BOSGENESIS_API_KEY"),
             enabled=enabled,
+            helm_base_url=os.getenv(
+                "HELM_MANAGER_MCP_ENDPOINT",
+                "http://bosgenesis-helm-manager-mcp:8080",
+            ),
+            helm_api_key=os.getenv("HELM_MANAGER_API_KEY") or os.getenv("BOSGENESIS_API_KEY"),
+            helm_ignore_prefixes=_csv_property(
+                "NAMESPACE_TWIN_HELM_IGNORE_PREFIXES",
+                default=("bosgenesis-",),
+            ),
+            installed_helm_releases_only=_bool_property(
+                "NAMESPACE_TWIN_HELM_INSTALLED_RELEASES_ONLY",
+                default=True,
+            ),
         )
 
     def collect(self, namespace: str, *, correlation_id: str) -> LiveSnapshot:
         if not self.enabled:
             return LiveSnapshot(warning="Live collection is disabled by configuration.")
         if not self.api_key:
-            return self._collect_mcp(namespace, correlation_id=correlation_id)
+            snapshot = self._collect_mcp(namespace, correlation_id=correlation_id)
+            return self._with_helm_inventory(
+                snapshot, namespace=namespace, correlation_id=correlation_id
+            )
 
         client = KubernetesInspectorRestDryRunClient(
             base_url=self.base_url,
@@ -79,17 +113,21 @@ class KubernetesLiveSnapshotCollector:
             complete_kinds.add(kind)
             resources.extend(_collection_items(result.data or {}, kind, namespace))
         if not complete_kinds:
-            return self._collect_mcp(
+            snapshot = self._collect_mcp(
                 namespace,
                 correlation_id=correlation_id,
                 prior_failures=failures,
             )
-        return LiveSnapshot(
-            resources=resources,
-            available=True,
-            complete_kinds=complete_kinds,
-            evidence_refs=evidence_refs,
-            warning=("; ".join(failures) if failures else None),
+        else:
+            snapshot = LiveSnapshot(
+                resources=resources,
+                available=True,
+                complete_kinds=complete_kinds,
+                evidence_refs=evidence_refs,
+                warning=("; ".join(failures) if failures else None),
+            )
+        return self._with_helm_inventory(
+            snapshot, namespace=namespace, correlation_id=correlation_id
         )
 
     def collect_runtime(self, namespace: str, *, correlation_id: str) -> dict[str, Any]:
@@ -210,6 +248,104 @@ class KubernetesLiveSnapshotCollector:
         base = self.base_url.rstrip("/")
         return base if base.endswith("/mcp") else f"{base}/mcp"
 
+    def _helm_mcp_url(self) -> str:
+        base = self.helm_base_url.rstrip("/")
+        return base if base.endswith("/mcp") else f"{base}/mcp"
+
+    def _with_helm_inventory(
+        self,
+        snapshot: LiveSnapshot,
+        *,
+        namespace: str,
+        correlation_id: str,
+    ) -> LiveSnapshot:
+        rows, inventory_available, failures = self._collect_helm_releases(
+            namespace, correlation_id=correlation_id
+        )
+        installed: set[str] = set()
+        ignored: set[str] = set()
+        for row in rows:
+            release_namespace = str(row.get("namespace") or namespace).strip()
+            if release_namespace != namespace:
+                continue
+            name = str(row.get("name") or row.get("release_name") or "").strip()
+            if not name or not _is_installed_release(row):
+                continue
+            chart = str(row.get("chart") or row.get("chart_name") or "").strip()
+            if _starts_with_prefix(name, self.helm_ignore_prefixes) or _starts_with_prefix(
+                chart, self.helm_ignore_prefixes
+            ):
+                ignored.add(name)
+                continue
+            installed.add(name)
+
+        resources = []
+        for resource in snapshot.resources:
+            release = _resource_helm_release(resource)
+            if release in ignored or _explicit_ignored_release(
+                resource, self.helm_ignore_prefixes
+            ):
+                continue
+            resources.append(deepcopy(resource))
+
+        warning_parts = [part for part in (snapshot.warning, *failures) if part]
+        evidence_refs = [
+            *snapshot.evidence_refs,
+            "bosgenesis-helm-manager-mcp:helm_list_releases",
+        ]
+        return LiveSnapshot(
+            resources=resources,
+            available=snapshot.available,
+            complete_kinds=set(snapshot.complete_kinds),
+            evidence_refs=list(dict.fromkeys(evidence_refs)),
+            warning="; ".join(warning_parts) if warning_parts else None,
+            helm_inventory_available=(
+                inventory_available and self.installed_helm_releases_only
+            ),
+            installed_helm_releases=installed,
+            ignored_helm_releases=ignored,
+            ignored_helm_prefixes=self.helm_ignore_prefixes,
+        )
+
+    def _collect_helm_releases(
+        self,
+        namespace: str,
+        *,
+        correlation_id: str,
+    ) -> tuple[list[dict[str, Any]], bool, list[str]]:
+        failures: list[str] = []
+        if self.helm_api_key:
+            client = HelmManagerRestDryRunClient(
+                base_url=self.helm_base_url,
+                api_key=self.helm_api_key,
+                job_id=correlation_id,
+                correlation_id=correlation_id,
+            )
+            result = client.list_releases(namespace=namespace, all_statuses=False)
+            if result.success:
+                return _helm_release_rows(result.data or {}), True, failures
+            failures.append(
+                "HelmRelease:"
+                + (result.error.error_code.value if result.error else "inventory_failed")
+            )
+
+        payloads, mcp_failures = _call_read_only_mcp(
+            self._helm_mcp_url(),
+            [
+                (
+                    "helm_list_releases",
+                    {
+                        "namespace": namespace,
+                        "all_statuses": False,
+                        "actor": "bosgenesis-mop-execution-agent",
+                    },
+                )
+            ],
+        )
+        failures.extend(mcp_failures)
+        payload = payloads.get("helm_list_releases")
+        return (_helm_release_rows(payload or {}), payload is not None, failures)
+
 
 class NullLiveSnapshotCollector:
     def collect(self, namespace: str, *, correlation_id: str) -> LiveSnapshot:
@@ -325,3 +461,67 @@ def _mapping_payload(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(candidate, dict):
             return candidate
     return data if isinstance(data, dict) else {}
+
+
+def _helm_release_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    def find(value: Any) -> list[dict[str, Any]] | None:
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if not isinstance(value, dict):
+            return None
+        for key in ("output", "releases", "items", "result", "data", "response"):
+            if key not in value:
+                continue
+            rows = find(value[key])
+            if rows is not None:
+                return rows
+        return None
+
+    return find(data) or []
+
+
+def _is_installed_release(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "").strip().casefold().replace("_", "-")
+    return status not in {"uninstalled", "uninstalling", "superseded"}
+
+
+def _resource_helm_release(resource: dict[str, Any]) -> str | None:
+    metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
+    annotations = (
+        metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
+    )
+    labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+    value = (
+        annotations.get("meta.helm.sh/release-name")
+        or labels.get("app.kubernetes.io/instance")
+        or labels.get("release")
+    )
+    return str(value).strip() if value else None
+
+
+def _explicit_ignored_release(resource: dict[str, Any], prefixes: tuple[str, ...]) -> bool:
+    metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
+    annotations = (
+        metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
+    )
+    release = annotations.get("meta.helm.sh/release-name")
+    return bool(release and _starts_with_prefix(str(release), prefixes))
+
+
+def _starts_with_prefix(value: str, prefixes: tuple[str, ...]) -> bool:
+    folded = value.casefold()
+    return bool(folded and any(folded.startswith(prefix.casefold()) for prefix in prefixes))
+
+
+def _csv_property(name: str, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _bool_property(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().casefold() not in {"0", "false", "no", "off"}

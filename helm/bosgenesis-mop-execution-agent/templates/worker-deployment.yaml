@@ -17,6 +17,8 @@ spec:
       labels:
         {{- include "bosgenesis-mop-execution-agent.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: worker
+      annotations:
+        bosgenesis.io/rollout-timestamp: {{ .Values.rolloutTimestamp | quote }}
     spec:
       serviceAccountName: {{ include "bosgenesis-mop-execution-agent.serviceAccountName" . }}
       securityContext:

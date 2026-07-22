@@ -46,12 +46,17 @@ class LiveSnapshot:
     complete_kinds: set[str] = field(default_factory=set)
     evidence_refs: list[str] = field(default_factory=list)
     warning: str | None = None
+    helm_inventory_available: bool = False
+    installed_helm_releases: set[str] = field(default_factory=set)
+    ignored_helm_releases: set[str] = field(default_factory=set)
+    ignored_helm_prefixes: tuple[str, ...] = ()
 
 
 def calculate_release_delta(
     planned_resources: list[dict[str, Any]],
     snapshot: LiveSnapshot,
     *,
+    planned_helm_installs: set[str] | None = None,
     target_namespace: str,
     explicit_deletes: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -68,6 +73,15 @@ def calculate_release_delta(
         payload = payload if isinstance(payload, dict) else {}
         manifest = payload.get("manifest")
         manifest = manifest if isinstance(manifest, dict) else {}
+        if _ignored_helm_resource(manifest, snapshot.ignored_helm_prefixes):
+            continue
+        if _uninstalled_helm_resource(
+            manifest,
+            inventory_available=snapshot.helm_inventory_available,
+            planned_install_releases=planned_helm_installs or set(),
+            installed_releases=snapshot.installed_helm_releases,
+        ):
+            continue
         identity = str(item.get("stable_identity") or resource_identity(manifest, target_namespace))
         planned = canonicalize_kubernetes_object(manifest)
         planned_paths[str(payload.get("path") or "")] = item
@@ -120,6 +134,8 @@ def calculate_release_delta(
                 planned=planned,
                 changes=changes,
                 evidence_refs=evidence_refs,
+                helm_inventory_available=snapshot.helm_inventory_available,
+                installed_helm_releases=snapshot.installed_helm_releases,
             )
         )
 
@@ -148,6 +164,8 @@ def calculate_release_delta(
                     planned=None,
                     changes=[],
                     evidence_refs=[str(manifest_ref)],
+                    helm_inventory_available=snapshot.helm_inventory_available,
+                    installed_helm_releases=snapshot.installed_helm_releases,
                 )
             )
     return _deduplicate(rows)
@@ -167,8 +185,17 @@ def _row(
     planned: dict[str, Any] | None,
     changes: list[dict[str, Any]],
     evidence_refs: list[str],
+    helm_inventory_available: bool,
+    installed_helm_releases: set[str],
 ) -> dict[str, Any]:
     diff = {"current": current, "planned": planned, "field_changes": changes}
+    helm_release = _helm_release(planned or current or {})
+    if (
+        helm_inventory_available
+        and action != "create"
+        and helm_release not in installed_helm_releases
+    ):
+        helm_release = None
     return {
         "change_id": f"delta_{uuid4().hex}",
         "resource_identity": identity,
@@ -176,7 +203,7 @@ def _row(
         "kind": kind,
         "namespace": namespace,
         "name": name,
-        "helm_release": _helm_release(planned or current or {}),
+        "helm_release": helm_release,
         "action": action,
         "current_summary": _summary(current),
         "planned_summary": _summary(planned),
@@ -280,8 +307,36 @@ def _summary(resource: dict[str, Any] | None) -> str | None:
 
 def _helm_release(resource: dict[str, Any]) -> str | None:
     metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
+    annotations = (
+        metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
+    )
     labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
-    return labels.get("app.kubernetes.io/instance") or labels.get("release")
+    value = (
+        annotations.get("meta.helm.sh/release-name")
+        or labels.get("app.kubernetes.io/instance")
+        or labels.get("release")
+    )
+    return str(value).strip() if value else None
+
+
+def _ignored_helm_resource(resource: dict[str, Any], prefixes: tuple[str, ...]) -> bool:
+    release = (_helm_release(resource) or "").casefold()
+    return bool(release and any(release.startswith(prefix.casefold()) for prefix in prefixes))
+
+
+def _uninstalled_helm_resource(
+    resource: dict[str, Any],
+    *,
+    inventory_available: bool,
+    installed_releases: set[str],
+    planned_install_releases: set[str],
+) -> bool:
+    if not inventory_available:
+        return False
+    release = (_helm_release(resource) or "").casefold()
+    installed = {item.casefold() for item in installed_releases}
+    planned_installs = {item.casefold() for item in planned_install_releases}
+    return bool(release and release not in installed and release not in planned_installs)
 
 
 def _is_full_manifest(resource: dict[str, Any]) -> bool:

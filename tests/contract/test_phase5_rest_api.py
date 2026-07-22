@@ -75,7 +75,10 @@ def test_artifact_bundle_job_control_and_retrieval_endpoints() -> None:
         f"/v1/execution-jobs/{job_id}/dry-run-evidence"
     ).json()
     assert dry_run_evidence["ok"] is True
-    assert dry_run_evidence["data"]["dry_run_evidence"]["authoritative"] is True
+    authoritative = dry_run_evidence["data"]["dry_run_evidence"]
+    assert authoritative["authoritative"] is True
+    assert authoritative["fidelity_contract"]["runtime_success_predicted"] is False
+    assert len(authoritative["fidelity_demonstrations"]) == 5
     assert client.get(f"/v1/execution-jobs/{job_id}/events").json()["ok"] is True
     assert client.get(f"/v1/execution-jobs/{job_id}/audit-events").json()["ok"] is True
     assert client.get(f"/v1/execution-jobs/{job_id}/memory-context").json()["ok"] is True

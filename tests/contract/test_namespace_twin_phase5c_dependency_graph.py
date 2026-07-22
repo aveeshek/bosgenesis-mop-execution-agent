@@ -11,12 +11,18 @@ from bosgenesis_mop_execution_agent.artifacts.models import (
     BundleSourceType,
     LoadedManifest,
 )
+from bosgenesis_mop_execution_agent.namespace_twin.delta import LiveSnapshot
 from bosgenesis_mop_execution_agent.namespace_twin.dependency_graph import (
     build_dependency_graph,
     stable_node_id,
 )
 from bosgenesis_mop_execution_agent.namespace_twin.persistence import NamespaceTwinRepository
 from bosgenesis_mop_execution_agent.namespace_twin.service import NamespaceTwinService
+from bosgenesis_mop_execution_agent.plans.models import (
+    MachinePlanCommand,
+    MachinePlanPhase,
+    MachinePlanStep,
+)
 
 FIXTURE = Path("tests/fixtures/sample_mop_bundle").resolve()
 TARGET = "sample-target"
@@ -170,6 +176,11 @@ def test_dependency_builder_records_real_and_missing_edges() -> None:
         if node["payload_redacted"]["status"] == "missing"
     }
     assert {("Secret", "api-secret"), ("ServiceAccount", "api-runner")} <= missing
+    assert not any(
+        node["api_version"] == "reference.esda/v1"
+        and node["kind"] == "CustomResourceDefinition"
+        for node in nodes
+    )
     assert summary["missing"] >= 2
     assert any(finding["code"] == "MISSING_DEPENDENCY" for finding in findings)
 
@@ -209,6 +220,136 @@ def test_dependency_builder_ignores_non_mapping_generated_references() -> None:
         for node in nodes
     )
 
+
+def test_twin_planning_includes_intended_helm_service_and_excludes_platform_configmaps(
+    tmp_path,
+) -> None:
+    source = BundleSource(type=BundleSourceType.LOCAL_PATH, value=str(FIXTURE))
+    base = load_and_validate_bundle(source, TARGET)
+    rendered = tmp_path / "rendered.yaml"
+    rendered.write_text(
+        """
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-release
+  labels:
+    app.kubernetes.io/instance: sample-release
+spec:
+  selector:
+    app: sample
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sample-release
+  labels:
+    app.kubernetes.io/instance: sample-release
+spec:
+  rules:
+    - host: sample.example.test
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sample-release
+                port:
+                  number: 80
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-root-ca.crt
+  labels:
+    app.kubernetes.io/instance: sample-release
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-ca-root-cert
+  labels:
+    app.kubernetes.io/instance: sample-release
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: application-config
+  labels:
+    app.kubernetes.io/instance: sample-release
+""".strip(),
+        encoding="utf-8",
+    )
+    install_step = MachinePlanStep(
+        step_id="install-sample",
+        title="Install sample release",
+        type="helm_upgrade",
+        metadata={"release_name": "sample-release"},
+        commands=[
+            MachinePlanCommand(
+                kind="dry_run",
+                command="helm upgrade --install sample-release repo/sample --dry-run",
+            )
+        ],
+    )
+    install_phase = MachinePlanPhase(
+        phase_id="install_sample",
+        title="Install sample",
+        objective="Install a new Helm release.",
+        steps=[install_step],
+    )
+    plan = base.machine_plan.model_copy(
+        update={"phases": [*base.machine_plan.phases, install_phase]}
+    )
+    bundle = base.model_copy(
+        update={
+            "root_path": tmp_path,
+            "artifact_index_root_path": tmp_path,
+            "artifact_index_json": {"rendered_manifests": ["rendered.yaml"]},
+            "machine_plan": plan,
+        }
+    )
+    service = NamespaceTwinService(
+        NamespaceTwinRepository(
+            f"sqlite+pysqlite:///{(tmp_path / 'planning.db').as_posix()}"
+        )
+    )
+    planned_installs = service._planned_helm_install_releases(bundle)
+    resources = service._resources(
+        bundle,
+        snapshot=LiveSnapshot(
+            helm_inventory_available=True,
+            installed_helm_releases=set(),
+        ),
+        planned_helm_installs=planned_installs,
+    )
+
+    identities = {(item["kind"], item["name"]) for item in resources}
+    assert planned_installs == {"sample-release"}
+    assert ("Service", "sample-release") in identities
+    assert ("Ingress", "sample-release") in identities
+    assert ("ConfigMap", "application-config") in identities
+    assert ("ConfigMap", "kube-root-ca.crt") not in identities
+    assert ("ConfigMap", "istio-ca-root-cert") not in identities
+
+    nodes, edges, findings, _summary = build_dependency_graph(bundle, resources)
+    assert any(
+        edge["edge_type"] == "route_backend"
+        and "Service:sample-target:sample-release" in edge["target_identity"]
+        for edge in edges
+    )
+    assert not any(
+        node["kind"] == "Service"
+        and node["name"] == "sample-release"
+        and node["payload_redacted"]["status"] == "missing"
+        for node in nodes
+    )
+    assert not any(
+        finding["code"] == "MISSING_DEPENDENCY"
+        and "sample-release" in finding["message"]
+        for finding in findings
+    )
 
 def test_real_dependency_graph_api_supports_filters_and_selected_context(tmp_path) -> None:
     service = NamespaceTwinService(

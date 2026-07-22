@@ -10,6 +10,7 @@ data:
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   ARTIFACT_ROOT_PATH: {{ .Values.config.artifactRootPath | quote }}
+  MOP_EXECUTION_STATE_DIR: {{ .Values.config.stateDir | quote }}
   POLICY_PROFILE: {{ .Values.config.policyProfile | quote }}
   TARGET_NAMESPACE_ONLY: {{ .Values.config.targetNamespaceOnly | quote }}
   DRY_RUN_BEFORE_MUTATION: {{ .Values.config.dryRunBeforeMutation | quote }}
@@ -36,6 +37,11 @@ data:
   LANGFUSE_ENABLED: {{ .Values.config.langfuseEnabled | quote }}
   K8S_INSPECTOR_MCP_ENDPOINT: {{ .Values.config.k8sInspectorMcpEndpoint | quote }}
   NAMESPACE_TWIN_LIVE_COLLECTION_ENABLED: {{ .Values.config.namespaceTwinLiveCollectionEnabled | quote }}
+  NAMESPACE_TWIN_HELM_INSTALLED_RELEASES_ONLY: {{ .Values.config.namespaceTwinHelmInstalledReleasesOnly | quote }}
+  NAMESPACE_TWIN_HELM_IGNORE_PREFIXES: {{ .Values.config.namespaceTwinHelmIgnorePrefixes | quote }}
+  NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_NAMES: {{ .Values.config.namespaceTwinConfigMapExcludeNames | quote }}
+  NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_PREFIXES: {{ .Values.config.namespaceTwinConfigMapExcludePrefixes | quote }}
+  NAMESPACE_TWIN_PVC_RISK_ENABLED: {{ .Values.config.namespaceTwinPvcRiskEnabled | quote }}
   HELM_MANAGER_MCP_ENDPOINT: {{ .Values.config.helmManagerMcpEndpoint | quote }}
   HELM_MANAGER_REST_TIMEOUT_SECONDS: {{ .Values.config.helmManagerRestTimeoutSeconds | quote }}
   HELM_MANAGER_OPERATION_TIMEOUT: {{ .Values.config.helmManagerOperationTimeout | quote }}

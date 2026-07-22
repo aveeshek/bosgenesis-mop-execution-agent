@@ -17,8 +17,9 @@ spec:
       labels:
         {{- include "bosgenesis-mop-execution-agent.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
-      {{- with .Values.podAnnotations }}
       annotations:
+        bosgenesis.io/rollout-timestamp: {{ .Values.rolloutTimestamp | quote }}
+      {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:

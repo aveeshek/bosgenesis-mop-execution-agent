@@ -19,3 +19,13 @@ execution:
   default_step_timeout_seconds: 600
   default_wait_poll_interval_seconds: 15
   max_parallel_jobs_per_namespace: 1
+
+namespace_twin:
+  helm_installed_releases_only: true
+  helm_ignore_prefixes:
+    - bosgenesis-
+  configmap_exclude_names:
+    - kube-root-ca.crt
+  configmap_exclude_prefixes:
+    - istio-
+  pvc_risk_enabled: false

@@ -84,6 +84,7 @@ def evaluate_policy_twin(
     explicit_deletes: list[dict[str, Any]],
     input_hash: str,
     target_namespace: str,
+    pvc_risk_enabled: bool = False,
     evaluated_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Return a versioned, non-LLM preliminary decision projection."""
@@ -163,6 +164,7 @@ def evaluate_policy_twin(
         bundle=bundle,
         explicit_deletes=explicit_deletes,
         evidence_axis=evidence_axis,
+        pvc_risk_enabled=pvc_risk_enabled,
     )
     policy_axis = _policy_axis(findings)
     decision_projection = _decision_projection(
@@ -305,14 +307,18 @@ def _risk_axis(
     bundle: ArtifactBundle,
     explicit_deletes: list[dict[str, Any]],
     evidence_axis: dict[str, Any],
+    pvc_risk_enabled: bool,
 ) -> dict[str, Any]:
     active = [row for row in deltas if row.get("action") not in {"no_op", None}]
     diffs = [_diff(row) for row in active]
     facts = {
-        "pvc_create_or_explicit_delete": bool(explicit_deletes)
-        or any(
-            row.get("kind") == "PersistentVolumeClaim" and row.get("action") == "create"
-            for row in active
+        "pvc_create_or_explicit_delete": pvc_risk_enabled
+        and (
+            bool(explicit_deletes)
+            or any(
+                row.get("kind") == "PersistentVolumeClaim" and row.get("action") == "create"
+                for row in active
+            )
         ),
         "statefulset_change": any(row.get("kind") == "StatefulSet" for row in active),
         "helm_release_upgrade": any(
@@ -331,7 +337,8 @@ def _risk_axis(
         ),
         "large_replica_change": any(_large_replica_change(diff) for diff in diffs),
         "missing_rollback_step": bool(active or explicit_deletes) and not _has_rollback(bundle),
-        "inferred_chart_or_value": any(
+        "inferred_chart_or_value": any(row.get("helm_release") for row in active)
+        and any(
             bool(step.inference) for phase in bundle.machine_plan.phases for step in phase.steps
         ),
         "partial_or_stale_live_evidence": evidence_axis["classification"]
@@ -345,6 +352,9 @@ def _risk_axis(
         matched = bool(facts[rule])
         value = weight if matched else 0
         raw_score += value
+        reason = _risk_reason(rule, matched)
+        if rule == "pvc_create_or_explicit_delete" and not pvc_risk_enabled:
+            reason = "PVC risk evaluation is disabled by configuration for this MVP."
         contributions.append(
             {
                 "axis": "risk",
@@ -353,7 +363,7 @@ def _risk_axis(
                 "effect": "increase" if matched else "none",
                 "contribution": value,
                 "weight": weight,
-                "reason": _risk_reason(rule, matched),
+                "reason": reason,
                 "evidence_refs": _risk_evidence(rule, active, evidence_axis),
             }
         )
@@ -367,6 +377,7 @@ def _risk_axis(
         "raw_score": raw_score,
         "rules_version": RISK_RULE_VERSION,
         "thresholds": {"green_max": 29, "amber_min": 30, "amber_max": 69, "red_min": 70},
+        "feature_toggles": {"pvc_risk_enabled": pvc_risk_enabled},
         "contributions": contributions,
     }
 
@@ -547,12 +558,18 @@ def _category(guardrail: str, code: str) -> str:
 
 
 def _has_rollback(bundle: ArtifactBundle) -> bool:
+    def describes_rollback(phase: Any, step: Any) -> bool:
+        text = (
+            f"{phase.phase_id} {phase.title or ''} {step.step_id} {step.title} {step.type}"
+        ).lower()
+        return bool(step.rollback_commands) or any(
+            token in text for token in ("rollback", "cleanup", "revert")
+        )
+
     return any(
-        token
-        in f"{phase.phase_id} {phase.title or ''} {step.step_id} {step.title} {step.type}".lower()
+        describes_rollback(phase, step)
         for phase in bundle.machine_plan.phases
         for step in phase.steps
-        for token in ("rollback", "cleanup", "revert")
     )
 
 
@@ -601,8 +618,7 @@ def _decision_summary(level: str, rule: str) -> str:
         "red": f"Red preliminary projection selected by precedence rule {rule}.",
         "amber": f"Amber preliminary projection selected by precedence rule {rule}.",
         "green": (
-            "Green preliminary projection; authoritative dry-run is still required "
-            "to finalize."
+            "Green preliminary projection; authoritative dry-run is still required to finalize."
         ),
     }.get(level, f"Decision contribution {rule} evaluated.")
 

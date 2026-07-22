@@ -195,8 +195,122 @@ def test_runtime_behavior_read_and_refresh_are_exposed_by_rest(tmp_path) -> None
     assert refreshed.json()["data"]["data"]["historical_context_status"] == ("not_available")
 
 
+def test_live_collector_uses_only_installed_target_releases_and_ignores_prefixes(
+    monkeypatch,
+) -> None:
+    def deployment(name: str, release: str) -> dict:
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": name,
+                "namespace": "agent-testing",
+                "annotations": {"meta.helm.sh/release-name": release},
+                "labels": {"app.kubernetes.io/instance": release},
+            },
+            "spec": {},
+        }
+
+    def fake_call(url: str, calls: list[tuple[str, dict]]) -> tuple[dict, list[str]]:
+        if "helm-manager" in url:
+            assert calls[0][1]["namespace"] == "agent-testing"
+            return {
+                "helm_list_releases": {
+                    "namespace": "agent-testing",
+                    "output": [
+                        {
+                            "name": "signoz",
+                            "namespace": "agent-testing",
+                            "chart": "signoz-0.122.0",
+                            "status": "deployed",
+                        },
+                        {
+                            "name": "bosgenesis-internal",
+                            "namespace": "agent-testing",
+                            "chart": "platform-1.0.0",
+                            "status": "deployed",
+                        },
+                        {
+                            "name": "custom-release",
+                            "namespace": "agent-testing",
+                            "chart": "bosgenesis-platform-2.0.0",
+                            "status": "deployed",
+                        },
+                        {
+                            "name": "old-release",
+                            "namespace": "agent-testing",
+                            "chart": "old-1.0.0",
+                            "status": "uninstalled",
+                        },
+                        {
+                            "name": "foreign",
+                            "namespace": "another-namespace",
+                            "chart": "foreign-1.0.0",
+                            "status": "deployed",
+                        },
+                    ],
+                }
+            }, []
+
+        payloads = {tool_name: {"result": []} for tool_name, _arguments in calls}
+        payloads["k8s_list_deployments"] = {
+            "result": [
+                deployment("signoz", "signoz"),
+                deployment("internal", "bosgenesis-internal"),
+                deployment("custom", "custom-release"),
+                deployment("label-only", "not-installed"),
+            ]
+        }
+        return payloads, []
+
+    monkeypatch.setattr(live_snapshot, "_call_read_only_mcp", fake_call)
+    collector = KubernetesLiveSnapshotCollector(
+        base_url="http://k8s-inspector.bosgenesis.local",
+        api_key=None,
+        helm_base_url="http://helm-manager.bosgenesis.local",
+        helm_api_key=None,
+        helm_ignore_prefixes=("bosgenesis-",),
+    )
+
+    snapshot = collector.collect("agent-testing", correlation_id="helm-inventory-test")
+
+    assert snapshot.helm_inventory_available is True
+    assert snapshot.installed_helm_releases == {"signoz"}
+    assert snapshot.ignored_helm_releases == {
+        "bosgenesis-internal",
+        "custom-release",
+    }
+    assert {item["metadata"]["name"] for item in snapshot.resources} == {
+        "signoz",
+        "label-only",
+    }
+    assert "bosgenesis-helm-manager-mcp:helm_list_releases" in snapshot.evidence_refs
+
+
+def test_live_collector_helm_prefixes_are_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("NAMESPACE_TWIN_HELM_IGNORE_PREFIXES", "internal-, platform-")
+    monkeypatch.setenv("NAMESPACE_TWIN_HELM_INSTALLED_RELEASES_ONLY", "false")
+
+    collector = KubernetesLiveSnapshotCollector.from_environment()
+
+    assert collector.helm_ignore_prefixes == ("internal-", "platform-")
+    assert collector.installed_helm_releases_only is False
+
+
 def test_live_collector_falls_back_to_read_only_mcp_without_rest_key(monkeypatch) -> None:
     def fake_call(url: str, calls: list[tuple[str, dict]]) -> tuple[dict, list[str]]:
+        if "helm-manager" in url:
+            assert calls == [
+                (
+                    "helm_list_releases",
+                    {
+                        "namespace": "agent-testing",
+                        "all_statuses": False,
+                        "actor": "bosgenesis-mop-execution-agent",
+                    },
+                )
+            ]
+            return {"helm_list_releases": {"output": []}}, []
         assert url == "http://k8s-inspector.bosgenesis.local/mcp"
         payloads = {}
         for tool_name, arguments in calls:

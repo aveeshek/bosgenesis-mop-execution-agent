@@ -39,6 +39,9 @@ from bosgenesis_mop_execution_agent.models import (
     ReportType,
 )
 from bosgenesis_mop_execution_agent.models.enums import ExecutionMode
+from bosgenesis_mop_execution_agent.namespace_twin.dry_run_fidelity import (
+    dry_run_fidelity_contract,
+)
 from bosgenesis_mop_execution_agent.observability.logging import log_event
 from bosgenesis_mop_execution_agent.observability.metrics import (
     record_approval_wait,
@@ -827,7 +830,7 @@ class MopExecutionApiService:
             step.step_id
             for step in steps
             if (step.commands or step.command_fingerprint)
-            and str(step.dry_run_status or "") != "dry_run_succeeded"
+            and str(step.dry_run_status or step.state) != "dry_run_succeeded"
         ]
         if terminal_failure or failed_steps:
             status = "failed"
@@ -854,7 +857,10 @@ class MopExecutionApiService:
                     "status": "failed",
                     "summary": "One or more authoritative dry-run steps were rejected.",
                 }
-            if all(str(step.dry_run_status or "") == "dry_run_succeeded" for step in matching):
+            if all(
+                str(step.dry_run_status or step.state) == "dry_run_succeeded"
+                for step in matching
+            ):
                 return {
                     "type": label,
                     "status": "passed",
@@ -936,6 +942,7 @@ class MopExecutionApiService:
             }
             for report in reports
         ]
+        fidelity = dry_run_fidelity_contract()
         evidence = {
             "dry_run_job_id": job.job_id,
             "status": status,
@@ -986,13 +993,20 @@ class MopExecutionApiService:
                 ],
             ],
             "fidelity_limitations": [
-                "Server-side dry-run cannot prove scheduling or controller convergence.",
                 (
-                    "Image pulls, storage binding, probes, traffic, and application health "
-                    "require runtime validation."
+                    "A successful dry-run proves API admission and static validation only; "
+                    "it is not predicted runtime success."
+                ),
+                (
+                    "Image pulls, scheduling, PVC binding, readiness probes, and controller "
+                    "or webhook convergence require runtime validation."
                 ),
                 "External DNS and dependencies are outside authoritative dry-run evidence.",
             ],
+            "fidelity_contract": {
+                key: value for key, value in fidelity.items() if key != "cases"
+            },
+            "fidelity_demonstrations": fidelity["cases"],
             "redacted": True,
         }
         return self._ok(

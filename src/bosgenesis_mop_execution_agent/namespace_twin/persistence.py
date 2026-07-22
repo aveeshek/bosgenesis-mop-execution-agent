@@ -9,7 +9,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, case, create_engine, func, or_, select
+from sqlalchemy import Integer, and_, case, cast, create_engine, func, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -488,6 +488,7 @@ class NamespaceTwinRepository:
                 "display_name": NamespaceTwinRunRow.display_name,
                 "lifecycle_status": NamespaceTwinRunRow.lifecycle_status,
                 "decision": NamespaceTwinRunRow.decision,
+                "risk_score": self._risk_score_expression(),
                 "target_namespace": NamespaceTwinRunRow.target_namespace,
                 "bundle_name": NamespaceTwinRunRow.bundle_name,
             }
@@ -502,6 +503,57 @@ class NamespaceTwinRepository:
                 statement.order_by(primary_order, secondary_order).offset(offset).limit(limit)
             ).all()
             return [self._run_dict(row) for row in rows], total, metrics
+
+    @staticmethod
+    def _risk_score_expression() -> Any:
+        """Return the persisted equivalent of the user-visible risk score."""
+        facts = NamespaceTwinRunRow.facts_redacted
+        policy_score = cast(
+            facts["policy_twin"]["risk_axis"]["score"].as_string(), Integer
+        )
+        policy_level = facts["policy_twin"]["risk_axis"]["level"].as_string()
+        runtime_score = cast(
+            facts["runtime_behavior_twin"]["risk_score"].as_string(), Integer
+        )
+        runtime_level = facts["runtime_behavior_twin"]["risk"].as_string()
+
+        fallback_score = case(
+            (NamespaceTwinRunRow.decision == "green", 15),
+            (NamespaceTwinRunRow.decision == "amber", 55),
+            (NamespaceTwinRunRow.decision == "red", 90),
+            (NamespaceTwinRunRow.lifecycle_status == "failed", 85),
+            else_=0,
+        )
+        fallback_level = case(
+            (NamespaceTwinRunRow.decision == "green", "low"),
+            (NamespaceTwinRunRow.decision == "amber", "medium"),
+            (NamespaceTwinRunRow.decision == "red", "high"),
+            (NamespaceTwinRunRow.lifecycle_status == "failed", "high"),
+            else_="unknown",
+        )
+        effective_policy_score = func.coalesce(policy_score, fallback_score)
+        effective_policy_level = func.coalesce(policy_level, fallback_level)
+        policy_rank = case(
+            (effective_policy_level == "low", 0),
+            (effective_policy_level == "medium", 1),
+            (effective_policy_level == "high", 2),
+            (effective_policy_level == "critical", 3),
+            else_=-1,
+        )
+        runtime_rank = case(
+            (runtime_level == "low", 0),
+            (runtime_level == "medium", 1),
+            (runtime_level == "high", 2),
+            (runtime_level == "critical", 3),
+            else_=-1,
+        )
+        return case(
+            (
+                runtime_rank > policy_rank,
+                func.coalesce(runtime_score, effective_policy_score),
+            ),
+            else_=effective_policy_score,
+        )
 
     def transition(
         self,

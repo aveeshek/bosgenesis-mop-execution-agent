@@ -50,9 +50,7 @@ def parse_machine_plan(path: str | Path) -> MachineExecutionPlan:
         raise MachinePlanParseError("machine_plan_not_mapping")
     loaded = _normalize_machine_plan_payload(loaded)
     try:
-        plan = MachineExecutionPlan.model_validate(
-            {**loaded, "raw_machine_execution_plan": loaded}
-        )
+        plan = MachineExecutionPlan.model_validate({**loaded, "raw_machine_execution_plan": loaded})
     except ValidationError as exc:
         raise MachinePlanParseError(f"machine_plan_schema_invalid:{exc}") from exc
     except ValueError as exc:
@@ -88,9 +86,7 @@ def parse_embedded_machine_plan(markdown_text: str) -> MachineExecutionPlan | No
         raise MachinePlanParseError("embedded_machine_plan_not_mapping")
     loaded = _normalize_machine_plan_payload(loaded)
     try:
-        plan = MachineExecutionPlan.model_validate(
-            {**loaded, "raw_machine_execution_plan": loaded}
-        )
+        plan = MachineExecutionPlan.model_validate({**loaded, "raw_machine_execution_plan": loaded})
     except ValidationError as exc:
         raise MachinePlanParseError(f"embedded_machine_plan_schema_invalid:{exc}") from exc
     validate_dependency_graph(plan)
@@ -206,6 +202,7 @@ def _normalize_steps(value: Any) -> list[dict[str, Any]]:
                 "manifest_refs": manifest_refs,
                 "values_refs": values_refs,
                 "commands": commands,
+                "rollback_commands": _string_list(item.get("rollback_commands")),
                 "metadata": _normalize_step_metadata(item),
                 "expected_outcomes": _string_list(item.get("expected_outcomes")),
                 "required_human_inputs": _string_list(item.get("required_human_inputs")),

@@ -61,6 +61,8 @@ def test_phase5a_list_filters_cursor_metrics_and_restores_active_and_terminal(tm
         }
     )
     filtered = service.list({"decision": "green", "actor": "operator-b"})
+    risk_ascending = service.list({"sort": "risk_score", "direction": "asc"})
+    risk_descending = service.list({"sort": "risk_score", "direction": "desc"})
 
     assert first_page["page"]["offset"] == 0
     assert first_page["items"][0]["twin_id"] == active["twin_id"]
@@ -70,12 +72,23 @@ def test_phase5a_list_filters_cursor_metrics_and_restores_active_and_terminal(tm
     assert first_page["metrics"]["green"] == 1
     assert filtered["page"]["result_count"] == 1
     assert filtered["items"][0]["decision"] == "green"
+    ascending_scores = [int(item["risk"]["score"] or 0) for item in risk_ascending["items"]]
+    descending_scores = [
+        int(item["risk"]["score"] or 0) for item in risk_descending["items"]
+    ]
+    assert ascending_scores == sorted(ascending_scores)
+    assert descending_scores == sorted(descending_scores, reverse=True)
     assert service.get(active["twin_id"])["visible_lifecycle"] == "awaiting_dry_run"
     assert service.get(terminal["twin_id"])["final_summary"]["decision"] == "green"
     assert green["decision_is_final"] is True
 
     assert service.get(terminal["twin_id"])["visible_lifecycle"] == "ready"
-    assert service.get(terminal["twin_id"])["risk"]["level"] == "low"
+    restored = service.get(terminal["twin_id"])
+    assert restored["risk"]["level"] == "medium"
+    assert (
+        restored["risk"]["score"]
+        == restored["foundation_facts"]["policy_twin"]["risk_axis"]["score"]
+    )
 
 
 def test_phase5a_overview_summaries_and_actions_are_authoritative(tmp_path) -> None:

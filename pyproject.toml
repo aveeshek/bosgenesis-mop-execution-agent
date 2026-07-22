@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bosgenesis-mop-execution-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Deterministic MoP execution worker for BOS Genesis Kubernetes and Helm artifact bundles."
 readme = "README.md"
 requires-python = ">=3.11"

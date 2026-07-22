@@ -75,6 +75,7 @@ def test_object_store_zip_source_resolves_and_validates(tmp_path: Path) -> None:
 
     assert bundle.machine_plan.phase_ids == {"apply_configmaps"}
 
+
 def test_artifact_manifest_source_resolves(tmp_path: Path) -> None:
     bundle_root = _copy_sample_bundle(tmp_path)
     manifest = tmp_path / "artifact-manifest.json"
@@ -159,6 +160,9 @@ def test_machine_plan_preserves_helm_metadata_fields(tmp_path: Path) -> None:
                     "command": "helm upgrade --install signoz signoz/signoz -n sample-target",
                 }
             ],
+            "rollback_commands": [
+                "helm uninstall signoz -n sample-target --wait",
+            ],
         }
     )
     values_dir = bundle_root / "values"
@@ -176,6 +180,9 @@ def test_machine_plan_preserves_helm_metadata_fields(tmp_path: Path) -> None:
     assert metadata["chart_ref"] == "signoz/signoz"
     assert metadata["chart_version"] == "0.129.0"
     assert metadata["repo_url"] == "https://charts.signoz.io"
+    assert bundle.machine_plan.phases[0].steps[0].rollback_commands == [
+        "helm uninstall signoz -n sample-target --wait"
+    ]
 
 
 def test_unsupported_schema_fails_closed(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-﻿"""Real, provisional namespace twin lifecycle foundation."""
+"""Real, provisional namespace twin lifecycle foundation."""
 
 from __future__ import annotations
 
@@ -6,11 +6,16 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import RLock
 from typing import Any
 from uuid import uuid4
+
+import yaml
 
 from bosgenesis_mop_execution_agent.artifacts.bundle_validator import (
     artifact_index_file_entries,
@@ -65,6 +70,32 @@ from bosgenesis_mop_execution_agent.namespace_twin.runtime_behavior_twin import 
 from bosgenesis_mop_execution_agent.plans.models import SUPPORTED_MACHINE_PLAN_SCHEMA_VERSIONS
 from bosgenesis_mop_execution_agent.security import redact_value
 
+DEFAULT_TWIN_CONFIGMAP_EXCLUDE_NAMES = ("kube-root-ca.crt",)
+DEFAULT_TWIN_CONFIGMAP_EXCLUDE_PREFIXES = ("istio-",)
+TWIN_RENDERED_HELM_KINDS = {
+    "ConfigMap",
+    "CronJob",
+    "DaemonSet",
+    "Deployment",
+    "Ingress",
+    "Job",
+    "NetworkPolicy",
+    "PersistentVolumeClaim",
+    "PodDisruptionBudget",
+    "Role",
+    "RoleBinding",
+    "Service",
+    "ServiceAccount",
+    "StatefulSet",
+}
+
+
+def _csv_property(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
 
 class NamespaceTwinError(RuntimeError):
     """Typed service error exposed through REST and the ESDA gateway."""
@@ -92,10 +123,28 @@ class NamespaceTwinService:
         repository: NamespaceTwinRepository | None = None,
         live_collector: LiveSnapshotCollector | None = None,
         execution_service: Any | None = None,
+        pvc_risk_enabled: bool | None = None,
+        configmap_exclude_names: tuple[str, ...] | None = None,
+        configmap_exclude_prefixes: tuple[str, ...] | None = None,
     ) -> None:
         self.repository = repository or NamespaceTwinRepository()
         self.live_collector = live_collector or KubernetesLiveSnapshotCollector.from_environment()
         self.execution_service = execution_service
+        self.pvc_risk_enabled = (
+            pvc_risk_enabled
+            if pvc_risk_enabled is not None
+            else os.getenv("NAMESPACE_TWIN_PVC_RISK_ENABLED", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.configmap_exclude_names = configmap_exclude_names or _csv_property(
+            "NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_NAMES",
+            DEFAULT_TWIN_CONFIGMAP_EXCLUDE_NAMES,
+        )
+        self.configmap_exclude_prefixes = configmap_exclude_prefixes or _csv_property(
+            "NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_PREFIXES",
+            DEFAULT_TWIN_CONFIGMAP_EXCLUDE_PREFIXES,
+        )
+        self._reconcile_lock = RLock()
         self.recovered_twin_ids = self.repository.recover_non_terminal()
 
     def create(self, payload: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
@@ -120,20 +169,26 @@ class NamespaceTwinService:
             provenance = self._verify_provenance(bundle)
             bundle_hash = self._directory_hash(bundle.root_path)
             input_hash = self._input_hash(bundle, provenance, target_cluster, target_namespace)
-            planned_resources = self._resources(bundle)
+            snapshot = self.live_collector.collect(
+                target_namespace, correlation_id=f"twin-snapshot-{uuid4().hex}"
+            )
+            planned_helm_installs = self._planned_helm_install_releases(bundle)
+            planned_resources = self._resources(
+                bundle,
+                snapshot=snapshot,
+                planned_helm_installs=planned_helm_installs,
+            )
             resources, edges, graph_findings, graph_summary = build_dependency_graph(
                 bundle, planned_resources
             )
             explicit_deletes = self._explicit_deletes(bundle)
             findings = self._findings(explicit_deletes) + graph_findings
-            snapshot = self.live_collector.collect(
-                target_namespace, correlation_id=f"twin-snapshot-{uuid4().hex}"
-            )
             deltas = calculate_release_delta(
                 planned_resources,
                 snapshot,
                 target_namespace=target_namespace,
                 explicit_deletes=explicit_deletes,
+                planned_helm_installs=planned_helm_installs,
             )
             policy_twin = evaluate_policy_twin(
                 bundle=bundle,
@@ -145,6 +200,7 @@ class NamespaceTwinService:
                 explicit_deletes=explicit_deletes,
                 input_hash=input_hash,
                 target_namespace=target_namespace,
+                pvc_risk_enabled=self.pvc_risk_enabled,
             )
             rollback_twin = assess_rollback_twin(bundle)
             runtime_context = self._collect_runtime_context(
@@ -217,6 +273,15 @@ class NamespaceTwinService:
             "module_modes": {
                 "release_delta_count": len(deltas),
                 "release_delta_summary": self._delta_summary(deltas),
+                "twin_planning": {
+                    "planned_helm_installs": sorted(planned_helm_installs),
+                    "configmap_exclude_names": list(self.configmap_exclude_names),
+                    "configmap_exclude_prefixes": list(self.configmap_exclude_prefixes),
+                    "configmap_bundle_debt": (
+                        "Platform-managed ConfigMaps remain in source bundles but are excluded "
+                        "from Namespace Twin planning until bundle generation can classify them."
+                    ),
+                },
                 "live_snapshot": {
                     "available": snapshot.available,
                     "snapshot_id": f"snapshot_{snapshot_hash[:24]}",
@@ -224,6 +289,10 @@ class NamespaceTwinService:
                     "hash": snapshot_hash,
                     "complete_kinds": sorted(snapshot.complete_kinds),
                     "resource_count": len(snapshot.resources),
+                    "helm_inventory_available": snapshot.helm_inventory_available,
+                    "installed_helm_releases": sorted(snapshot.installed_helm_releases),
+                    "ignored_helm_releases": sorted(snapshot.ignored_helm_releases),
+                    "ignored_helm_prefixes": list(snapshot.ignored_helm_prefixes),
                     "evidence_refs": snapshot.evidence_refs,
                     "warning": snapshot.warning,
                 },
@@ -286,6 +355,8 @@ class NamespaceTwinService:
             deltas=deltas,
         )
         if not created:
+            if payload.get("run_authoritative_dry_run"):
+                run = self._ensure_authoritative_dry_run(run, source=source)
             return {**self._project(run), "idempotent_replay": True}
         try:
             self.repository.transition(
@@ -319,7 +390,168 @@ class NamespaceTwinService:
         supersedes_twin_id = str(payload.get("supersedes_twin_id") or "").strip()
         if supersedes_twin_id:
             self.repository.supersede(supersedes_twin_id, superseded_by=twin_id)
+        if payload.get("run_authoritative_dry_run"):
+            run = self._ensure_authoritative_dry_run(run, source=source)
         return self._project(run)
+
+    def _ensure_authoritative_dry_run(
+        self,
+        core: dict[str, Any],
+        *,
+        source: BundleSource,
+    ) -> dict[str, Any]:
+        """Create and start one shared, dry-run-only execution job for a twin."""
+        if self.execution_service is None:
+            raise NamespaceTwinError(
+                "execution_service_unavailable",
+                "The shared MoP Execution service is unavailable.",
+                status_code=503,
+            )
+        twin_id = str(core["twin_id"])
+        facts = dict(core.get("facts") or {})
+        linked_job_id = str(facts.get("dry_run_job_id") or "").strip()
+        if linked_job_id:
+            return core
+
+        job_id = f"twinjob_{twin_id.removeprefix('twin_')}"
+        bundle_id = f"twinbundle_{str(core.get('bundle_hash') or '')[:24]}"
+        existing_job = self.execution_service.get_job(job_id)
+        if not existing_job.get("ok"):
+            registered = self.execution_service.register_bundle(
+                {
+                    "bundle_id": bundle_id,
+                    "source": source.model_dump(mode="json"),
+                    "target_namespace": core["target_namespace"],
+                }
+            )
+            if not registered.get("ok"):
+                raise NamespaceTwinError(
+                    "simulation_bundle_registration_failed",
+                    "The authoritative simulation bundle could not be registered.",
+                    status_code=502,
+                    details={"twin_id": twin_id},
+                )
+            validated = self.execution_service.validate_bundle(bundle_id, {})
+            validation_data = dict(validated.get("data") or {})
+            if not validated.get("ok") or validation_data.get("valid") is not True:
+                raise NamespaceTwinError(
+                    "simulation_bundle_validation_failed",
+                    "The authoritative simulation bundle did not pass execution validation.",
+                    status_code=409,
+                    details={
+                        "twin_id": twin_id,
+                        "validation": redact_value(validation_data),
+                    },
+                )
+            created_job = self.execution_service.create_job(
+                {
+                    "job_id": job_id,
+                    "bundle_id": bundle_id,
+                    "target_namespace": core["target_namespace"],
+                    "source_namespace": core.get("source_namespace"),
+                    "execution_mode": "dry_run_only",
+                    "job_name": f"Namespace Twin simulation {twin_id}",
+                    "correlation_id": f"namespace-twin-{twin_id}",
+                    "namespace_twin_input_hash": core.get("input_hash"),
+                    "bundle_hash": core.get("bundle_hash"),
+                    "snapshot_hash": (facts.get("drift_baseline") or {}).get("hash"),
+                }
+            )
+            if not created_job.get("ok"):
+                raise NamespaceTwinError(
+                    "simulation_job_creation_failed",
+                    "The authoritative dry-run job could not be created.",
+                    status_code=502,
+                    details={"twin_id": twin_id},
+                )
+
+        started = self.execution_service.start_job(job_id)
+        if not started.get("ok"):
+            raise NamespaceTwinError(
+                "simulation_job_start_failed",
+                "The authoritative dry-run job could not be started.",
+                status_code=502,
+                details={"twin_id": twin_id, "dry_run_job_id": job_id},
+            )
+        return self.repository.merge_facts(
+            twin_id,
+            {
+                "dry_run_job_id": job_id,
+                "dry_run_status": "queued",
+                "simulation": {
+                    "mode": "full_on_demand",
+                    "state": "queued",
+                    "bundle_id": bundle_id,
+                    "dry_run_job_id": job_id,
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "mutation_performed": False,
+                },
+            },
+            event_type="authoritative_simulation_started",
+            message="Authoritative namespace simulation dry-run was created and queued.",
+            event_payload={
+                "dry_run_job_id": job_id,
+                "bundle_id": bundle_id,
+                "execution_mode": "dry_run_only",
+                "mutation_performed": False,
+            },
+        )
+
+    def _reconcile_authoritative_dry_run(self, twin_id: str) -> dict[str, Any]:
+        """Reconcile a linked durable dry-run into the twin's deterministic decision."""
+        with self._reconcile_lock:
+            core = self.repository.get_run(twin_id)
+            if core.get("decision_is_final") or core.get("lifecycle_status") in {
+                "failed",
+                "cancelled",
+                "superseded",
+                "expired",
+            }:
+                return core
+            facts = dict(core.get("facts") or {})
+            job_id = str(facts.get("dry_run_job_id") or "").strip()
+            if not job_id or self.execution_service is None:
+                return core
+
+            job_response = self.execution_service.get_job(job_id)
+            if not job_response.get("ok"):
+                observed_state = "unavailable"
+                job_state = "unavailable"
+            else:
+                job = dict((job_response.get("data") or {}).get("job") or {})
+                job_state = str(job.get("state") or "unknown")
+                observed_state = job_state
+
+            simulation = dict(facts.get("simulation") or {})
+            prior_state = str(simulation.get("state") or "")
+            terminal_job_states = {"completed", "failed", "cancelled", "decision_required"}
+            if job_state not in terminal_job_states:
+                if observed_state != prior_state:
+                    core = self.repository.merge_facts(
+                        twin_id,
+                        {
+                            "dry_run_status": observed_state,
+                            "simulation": {
+                                **simulation,
+                                "state": observed_state,
+                                "last_reconciled_at": datetime.now(UTC).isoformat(),
+                            },
+                        },
+                        event_type="authoritative_simulation_progress",
+                        message=(
+                            f"Authoritative simulation job state changed to {observed_state}."
+                        ),
+                        event_payload={
+                            "dry_run_job_id": job_id,
+                            "job_state": observed_state,
+                        },
+                    )
+                return core
+
+            return self.attach_dry_run_evidence(
+                twin_id,
+                {"dry_run_job_id": job_id},
+            )["twin"]
 
     def attach_dry_run_evidence(
         self,
@@ -445,6 +677,7 @@ class NamespaceTwinService:
         module_modes["dry-run"] = "real_core"
         module_modes["rollback"] = "real_core"
         rollback_twin = enrich_rollback_proof(dict(facts.get("rollback_twin") or {}), evidence)
+        simulation = dict(facts.get("simulation") or {})
         attached_facts = {
             "module_modes": module_modes,
             "dry_run_job_id": job_id,
@@ -453,6 +686,21 @@ class NamespaceTwinService:
             "command_fingerprint_hash": evidence.get("command_fingerprint_hash"),
             "dry_run_attached_at": datetime.now(UTC).isoformat(),
             "rollback_twin": rollback_twin,
+            "simulation": (
+                {
+                    **simulation,
+                    "state": (
+                        "completed"
+                        if evidence_status == "passed"
+                        else "completed_with_findings"
+                    ),
+                    "evidence_status": evidence_status,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "mutation_performed": False,
+                }
+                if simulation
+                else {}
+            ),
         }
         updated = self.repository.merge_facts(
             twin_id,
@@ -645,6 +893,10 @@ class NamespaceTwinService:
                 },
                 "evidence_refs": list(evidence.get("evidence_refs") or []),
                 "fidelity_limitations": list(evidence.get("fidelity_limitations") or []),
+                "fidelity_contract": dict(evidence.get("fidelity_contract") or {}),
+                "fidelity_demonstrations": list(
+                    evidence.get("fidelity_demonstrations") or []
+                ),
                 "artifacts": list(evidence.get("reports") or []),
                 "failed_steps": list(evidence.get("failed_steps") or []),
                 "partial_steps": list(evidence.get("partial_steps") or []),
@@ -993,6 +1245,7 @@ class NamespaceTwinService:
         }
 
     def events(self, twin_id: str, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        self._reconcile_authoritative_dry_run(twin_id)
         rows, total = self.repository.list_events(twin_id, limit=limit, offset=offset)
         return {
             "twin_id": twin_id,
@@ -1128,7 +1381,7 @@ class NamespaceTwinService:
 
     def get(self, twin_id: str) -> dict[str, Any]:
         """Restore either an active or terminal twin with server-owned projections."""
-        return self._project(self.repository.get_run(twin_id))
+        return self._project(self._reconcile_authoritative_dry_run(twin_id))
 
     def list(self, query: dict[str, Any]) -> dict[str, Any]:
         limit = self._bounded_int(query.get("limit"), default=25, minimum=1, maximum=100)
@@ -1140,6 +1393,7 @@ class NamespaceTwinService:
             "display_name",
             "lifecycle_status",
             "decision",
+            "risk_score",
             "target_namespace",
             "bundle_name",
         }:
@@ -1691,11 +1945,7 @@ class NamespaceTwinService:
         policy_assessment = facts.get("policy_twin") or {}
         runtime_assessment = facts.get("runtime_behavior_twin") or {}
         runtime_effect = str(runtime_assessment.get("execution_effect") or "no_uplift")
-        risk = (
-            self._risk(status, decision)
-            if bool(core.get("decision_is_final"))
-            else dict(policy_assessment.get("risk_axis") or self._risk(status, decision))
-        )
+        risk = dict(policy_assessment.get("risk_axis") or self._risk(status, decision))
         runtime_level = str(runtime_assessment.get("risk") or "unknown")
         risk_order = {"unknown": -1, "low": 0, "medium": 1, "high": 2, "critical": 3}
         if risk_order.get(runtime_level, -1) > risk_order.get(str(risk.get("level")), -1):
@@ -2385,41 +2635,227 @@ class NamespaceTwinService:
         canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    @classmethod
-    def _resources(cls, bundle: ArtifactBundle) -> list[dict[str, Any]]:
-        resources: list[dict[str, Any]] = []
-        rollback_evidence_paths = cls._rollback_evidence_manifest_paths(bundle)
+    def _resources(
+        self,
+        bundle: ArtifactBundle,
+        *,
+        snapshot: Any,
+        planned_helm_installs: set[str],
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        rollback_evidence_paths = self._rollback_evidence_manifest_paths(bundle)
         for manifest in bundle.manifests:
             if Path(manifest.path).as_posix() in rollback_evidence_paths:
                 continue
-            namespace = (
-                None
-                if manifest.scope == "cluster"
-                else manifest.namespace or bundle.target_namespace
+            candidates.append(
+                self._resource_record(
+                    manifest.content,
+                    path=manifest.path,
+                    document_index=manifest.document_index,
+                    target_namespace=bundle.target_namespace,
+                    source="bundle_manifest",
+                )
             )
-            identity = (
-                f"{manifest.api_version}:{manifest.kind}:{namespace or '_cluster'}:{manifest.name}"
+
+        candidates.extend(
+            self._rendered_helm_resources(
+                bundle,
+                planned_helm_installs=planned_helm_installs,
             )
-            resources.append(
-                {
-                    "resource_id": f"twinres_{uuid4().hex}",
-                    "stable_identity": identity,
-                    "api_version": manifest.api_version,
-                    "kind": manifest.kind,
-                    "name": manifest.name,
-                    "namespace": namespace,
-                    "payload_redacted": {
-                        "path": manifest.path,
-                        "document_index": manifest.document_index,
-                        "manifest": canonicalize_kubernetes_object(manifest.content),
-                        "source": "rendered_manifest",
-                        "status": "present",
-                        "risk": "low",
-                        "evidence_refs": [manifest.path],
-                    },
-                }
-            )
+        )
+
+        selected: dict[str, dict[str, Any]] = {}
+        for resource in candidates:
+            manifest = (resource.get("payload_redacted") or {}).get("manifest") or {}
+            if self._excluded_configmap(resource):
+                continue
+            if self._excluded_helm_resource(
+                manifest,
+                snapshot=snapshot,
+                planned_helm_installs=planned_helm_installs,
+            ):
+                continue
+            selected.setdefault(str(resource["stable_identity"]), resource)
+        return list(selected.values())
+
+    @staticmethod
+    def _resource_record(
+        manifest: dict[str, Any],
+        *,
+        path: str,
+        document_index: int,
+        target_namespace: str,
+        source: str,
+    ) -> dict[str, Any]:
+        content = deepcopy(manifest)
+        metadata = content.setdefault("metadata", {})
+        api_version = str(content.get("apiVersion") or "")
+        kind = str(content.get("kind") or "")
+        name = str(metadata.get("name") or "")
+        namespace = str(metadata.get("namespace") or target_namespace)
+        metadata["namespace"] = namespace
+        identity = f"{api_version}:{kind}:{namespace}:{name}"
+        return {
+            "resource_id": f"twinres_{uuid4().hex}",
+            "stable_identity": identity,
+            "api_version": api_version,
+            "kind": kind,
+            "name": name,
+            "namespace": namespace,
+            "payload_redacted": {
+                "path": path,
+                "document_index": document_index,
+                "manifest": canonicalize_kubernetes_object(content),
+                "source": source,
+                "status": "present",
+                "risk": "low",
+                "evidence_refs": [path],
+            },
+        }
+
+    @classmethod
+    def _rendered_helm_resources(
+        cls,
+        bundle: ArtifactBundle,
+        *,
+        planned_helm_installs: set[str],
+    ) -> list[dict[str, Any]]:
+        if not planned_helm_installs or not bundle.artifact_index_json:
+            return []
+        paths = [
+            item
+            for item in bundle.artifact_index_json.get("rendered_manifests", [])
+            if isinstance(item, str)
+        ]
+        for entry in bundle.artifact_index_json.get("files", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role") or "").casefold()
+            path = entry.get("path")
+            if isinstance(path, str) and "rendered" in role and path not in paths:
+                paths.append(path)
+
+        root = bundle.artifact_index_root_path or bundle.root_path
+        root_resolved = root.resolve()
+        planned = {item.casefold() for item in planned_helm_installs}
+        resources: list[dict[str, Any]] = []
+        for relative_path in paths:
+            candidate = (root / relative_path).resolve()
+            try:
+                candidate.relative_to(root_resolved)
+            except ValueError:
+                continue
+            if not candidate.is_file():
+                continue
+            try:
+                documents = list(yaml.safe_load_all(candidate.read_text(encoding="utf-8")))
+            except (OSError, UnicodeError, yaml.YAMLError):
+                continue
+            display_path = cls._bundle_relative_path(bundle, candidate)
+            document_index = 0
+            for document in documents:
+                expanded = (
+                    document.get("items") or []
+                    if isinstance(document, dict) and document.get("kind") == "List"
+                    else [document]
+                )
+                for item in expanded:
+                    if not isinstance(item, dict):
+                        continue
+                    kind = str(item.get("kind") or "")
+                    metadata = item.get("metadata")
+                    if (
+                        kind not in TWIN_RENDERED_HELM_KINDS
+                        or not isinstance(metadata, dict)
+                        or not metadata.get("name")
+                    ):
+                        continue
+                    release = cls._resource_helm_release(item)
+                    if not release or release.casefold() not in planned:
+                        continue
+                    resources.append(
+                        cls._resource_record(
+                            item,
+                            path=display_path,
+                            document_index=document_index,
+                            target_namespace=bundle.target_namespace,
+                            source="helm_rendered_manifest",
+                        )
+                    )
+                    document_index += 1
         return resources
+
+    @staticmethod
+    def _bundle_relative_path(bundle: ArtifactBundle, path: Path) -> str:
+        try:
+            return path.relative_to(bundle.root_path.resolve()).as_posix()
+        except ValueError:
+            return path.name
+
+    def _excluded_configmap(self, resource: dict[str, Any]) -> bool:
+        if str(resource.get("kind") or "") != "ConfigMap":
+            return False
+        name = str(resource.get("name") or "").casefold()
+        names = {item.casefold() for item in self.configmap_exclude_names}
+        prefixes = tuple(item.casefold() for item in self.configmap_exclude_prefixes)
+        return name in names or any(name.startswith(prefix) for prefix in prefixes)
+
+    @classmethod
+    def _excluded_helm_resource(
+        cls,
+        manifest: dict[str, Any],
+        *,
+        snapshot: Any,
+        planned_helm_installs: set[str],
+    ) -> bool:
+        release = cls._resource_helm_release(manifest)
+        if not release:
+            return False
+        folded = release.casefold()
+        if any(
+            folded.startswith(prefix.casefold())
+            for prefix in getattr(snapshot, "ignored_helm_prefixes", ())
+        ):
+            return True
+        if not getattr(snapshot, "helm_inventory_available", False):
+            return False
+        installed = {
+            item.casefold() for item in getattr(snapshot, "installed_helm_releases", set())
+        }
+        planned = {item.casefold() for item in planned_helm_installs}
+        return folded not in installed and folded not in planned
+
+    @staticmethod
+    def _resource_helm_release(manifest: dict[str, Any]) -> str | None:
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        annotations = (
+            metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
+        )
+        labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+        value = (
+            annotations.get("meta.helm.sh/release-name")
+            or labels.get("app.kubernetes.io/instance")
+            or labels.get("release")
+        )
+        return str(value).strip() if value else None
+
+    @staticmethod
+    def _planned_helm_install_releases(bundle: ArtifactBundle) -> set[str]:
+        releases: set[str] = set()
+        pattern = re.compile(r"\bhelm\s+(?:upgrade\s+--install|install)\s+([^\s]+)", re.I)
+        for phase in bundle.machine_plan.phases:
+            for step in phase.steps:
+                commands = "\n".join(command.command for command in step.commands)
+                intentional_install = step.type == "helm_install" or bool(pattern.search(commands))
+                if not intentional_install:
+                    continue
+                release = str(step.metadata.get("release_name") or "").strip()
+                if not release:
+                    match = pattern.search(commands)
+                    release = match.group(1).strip("'\"") if match else ""
+                if release:
+                    releases.add(release)
+        return releases
 
     @staticmethod
     def _rollback_evidence_manifest_paths(bundle: ArtifactBundle) -> set[str]:

@@ -150,6 +150,79 @@ def test_explicit_delete_requires_machine_plan_evidence() -> None:
     assert rows[0]["action"] == "explicit_delete"
 
 
+def test_helm_upgrade_identity_requires_installed_target_release_and_honors_ignore_prefix() -> None:
+    planned_manifest = _manifest(data={"mode": "new"})
+    planned_manifest["metadata"]["labels"] = {"app.kubernetes.io/instance": "candidate-release"}
+    current_manifest = _manifest(data={"mode": "old"})
+    current_manifest["metadata"]["labels"] = {"app.kubernetes.io/instance": "candidate-release"}
+    record = _record(planned_manifest)
+
+    unverified = calculate_release_delta(
+        [record],
+        LiveSnapshot(
+            resources=[current_manifest],
+            available=True,
+            complete_kinds={"ConfigMap"},
+            helm_inventory_available=True,
+            installed_helm_releases={"another-release"},
+        ),
+        target_namespace="sample-target",
+    )
+    installed = calculate_release_delta(
+        [record],
+        LiveSnapshot(
+            resources=[current_manifest],
+            available=True,
+            complete_kinds={"ConfigMap"},
+            helm_inventory_available=True,
+            installed_helm_releases={"candidate-release"},
+        ),
+        target_namespace="sample-target",
+    )
+
+    assert unverified == []
+    assert installed[0]["helm_release"] == "candidate-release"
+
+    absent_create = calculate_release_delta(
+        [record],
+        LiveSnapshot(
+            available=True,
+            complete_kinds={"ConfigMap"},
+            helm_inventory_available=True,
+            installed_helm_releases=set(),
+        ),
+        target_namespace="sample-target",
+    )
+    assert absent_create == []
+
+    intentional_install = calculate_release_delta(
+        [record],
+        LiveSnapshot(
+            available=True,
+            complete_kinds={"ConfigMap"},
+            helm_inventory_available=True,
+            installed_helm_releases=set(),
+        ),
+        target_namespace="sample-target",
+        planned_helm_installs={"candidate-release"},
+    )
+    assert intentional_install[0]["action"] == "create"
+    assert intentional_install[0]["helm_release"] == "candidate-release"
+
+    ignored_manifest = _manifest(name="internal")
+    ignored_manifest["metadata"]["labels"] = {"app.kubernetes.io/instance": "bosgenesis-internal"}
+    ignored = calculate_release_delta(
+        [_record(ignored_manifest)],
+        LiveSnapshot(
+            available=True,
+            complete_kinds={"ConfigMap"},
+            ignored_helm_prefixes=("bosgenesis-",),
+        ),
+        target_namespace="sample-target",
+    )
+    assert ignored == []
+
+
 def test_real_release_delta_api_is_filterable_and_contract_shaped(tmp_path) -> None:
     current = _manifest(data={"mode": "old"})
     service = NamespaceTwinService(

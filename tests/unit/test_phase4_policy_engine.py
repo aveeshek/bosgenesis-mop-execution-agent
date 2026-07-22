@@ -203,6 +203,50 @@ def test_secret_values_are_detected_across_payload_types() -> None:
     assert "SECRET_VALUES_BLOCKED" in _codes(decision)
 
 
+def test_kubernetes_secret_references_are_not_treated_as_secret_values() -> None:
+    deployment = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "safe", "namespace": "target-ns"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "automountServiceAccountToken": False,
+                    "imagePullSecrets": [{"name": "registry-credentials"}],
+                    "containers": [
+                        {
+                            "name": "app",
+                            "image": "example/app:1.0",
+                            "env": [
+                                {
+                                    "name": "DATABASE_PASSWORD",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": "database-credentials",
+                                            "key": "password",
+                                        }
+                                    },
+                                }
+                            ],
+                            "envFrom": [{"secretRef": {"name": "application-config"}}],
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+    decision = evaluate_policy(
+        PolicyEvaluationContext(
+            job_id="job-1",
+            target_namespace="target-ns",
+            manifests=[deployment],
+        )
+    )
+
+    assert "SECRET_VALUES_BLOCKED" not in _codes(decision)
+
+
 def test_production_data_and_pvc_copy_are_blocked() -> None:
     decision = evaluate_policy(
         PolicyEvaluationContext(

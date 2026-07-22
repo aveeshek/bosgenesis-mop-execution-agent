@@ -16,6 +16,19 @@ from bosgenesis_mop_execution_agent.security.sensitive_patterns import (
 
 REDACTION_TEXT = "[REDACTED]"
 
+# These Kubernetes fields reference Secret objects or service-account token
+# projection settings; they do not contain secret values themselves. Nested
+# strings are still inspected for sensitive value patterns.
+SAFE_SECRET_REFERENCE_KEYS = frozenset(
+    {
+        "automountserviceaccounttoken",
+        "imagepullsecrets",
+        "secretkeyref",
+        "secretref",
+        "serviceaccounttoken",
+    }
+)
+
 
 class SensitiveFinding(StrictBaseModel):
     """Location and reason for a sensitive content finding."""
@@ -37,7 +50,7 @@ def find_sensitive_content(value: Any, path: str = "$") -> list[SensitiveFinding
         for key, nested in value.items():
             key_text = str(key)
             nested_path = f"{path}.{key_text}"
-            if SENSITIVE_KEY_PATTERN.search(key_text) and nested not in (
+            if _is_sensitive_key(key_text) and nested not in (
                 None,
                 "",
                 [],
@@ -60,7 +73,7 @@ def redact_value(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, nested in value.items():
             key_text = str(key)
-            if SENSITIVE_KEY_PATTERN.search(key_text) and nested not in (None, "", [], {}):
+            if _is_sensitive_key(key_text) and nested not in (None, "", [], {}):
                 redacted[key_text] = REDACTION_TEXT
             else:
                 redacted[key_text] = redact_value(nested)
@@ -79,6 +92,13 @@ def redact_string(value: str) -> str:
         redacted = pattern.sub(REDACTION_TEXT, redacted)
     redacted = _redact_base64_secret_tokens(redacted)
     return redacted
+
+
+def _is_sensitive_key(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", value.lower())
+    return (
+        bool(SENSITIVE_KEY_PATTERN.search(value)) and normalized not in SAFE_SECRET_REFERENCE_KEYS
+    )
 
 
 def _string_findings(value: str, path: str) -> list[SensitiveFinding]:
