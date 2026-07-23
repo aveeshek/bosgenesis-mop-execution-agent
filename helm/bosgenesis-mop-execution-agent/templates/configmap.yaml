@@ -42,6 +42,7 @@ data:
   NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_NAMES: {{ .Values.config.namespaceTwinConfigMapExcludeNames | quote }}
   NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_PREFIXES: {{ .Values.config.namespaceTwinConfigMapExcludePrefixes | quote }}
   NAMESPACE_TWIN_PVC_RISK_ENABLED: {{ .Values.config.namespaceTwinPvcRiskEnabled | quote }}
+  NAMESPACE_TWIN_STATEFULSET_RISK_ENABLED: {{ .Values.config.namespaceTwinStatefulSetRiskEnabled | quote }}
   HELM_MANAGER_MCP_ENDPOINT: {{ .Values.config.helmManagerMcpEndpoint | quote }}
   HELM_MANAGER_REST_TIMEOUT_SECONDS: {{ .Values.config.helmManagerRestTimeoutSeconds | quote }}
   HELM_MANAGER_OPERATION_TIMEOUT: {{ .Values.config.helmManagerOperationTimeout | quote }}

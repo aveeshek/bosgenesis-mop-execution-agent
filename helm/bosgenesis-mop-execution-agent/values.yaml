@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/aveeshek/bosgenesis-mop-execution-agent
-  tag: "0.1.4"
+  tag: "0.1.5"
   pullPolicy: IfNotPresent
 
 nameOverride: ""
@@ -61,6 +61,7 @@ config:
   namespaceTwinConfigMapExcludeNames: "kube-root-ca.crt"
   namespaceTwinConfigMapExcludePrefixes: "istio-"
   namespaceTwinPvcRiskEnabled: "false"
+  namespaceTwinStatefulSetRiskEnabled: "false"
   helmManagerMcpEndpoint: "http://bosgenesis-helm-manager-mcp.bosgenesis.svc.cluster.local:8080"
   helmManagerRestTimeoutSeconds: "960"
   helmManagerOperationTimeout: "15m"

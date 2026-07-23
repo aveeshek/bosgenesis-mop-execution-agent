@@ -127,6 +127,7 @@ class NamespaceTwinService:
         live_collector: LiveSnapshotCollector | None = None,
         execution_service: Any | None = None,
         pvc_risk_enabled: bool | None = None,
+        statefulset_risk_enabled: bool | None = None,
         configmap_exclude_names: tuple[str, ...] | None = None,
         configmap_exclude_prefixes: tuple[str, ...] | None = None,
     ) -> None:
@@ -137,6 +138,12 @@ class NamespaceTwinService:
             pvc_risk_enabled
             if pvc_risk_enabled is not None
             else os.getenv("NAMESPACE_TWIN_PVC_RISK_ENABLED", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.statefulset_risk_enabled = (
+            statefulset_risk_enabled
+            if statefulset_risk_enabled is not None
+            else os.getenv("NAMESPACE_TWIN_STATEFULSET_RISK_ENABLED", "false").strip().lower()
             in {"1", "true", "yes", "on"}
         )
         self.configmap_exclude_names = configmap_exclude_names or _csv_property(
@@ -207,6 +214,7 @@ class NamespaceTwinService:
                 input_hash=input_hash,
                 target_namespace=target_namespace,
                 pvc_risk_enabled=self.pvc_risk_enabled,
+                statefulset_risk_enabled=self.statefulset_risk_enabled,
             )
             rollback_twin = assess_rollback_twin(bundle)
             runtime_context = self._collect_runtime_context(

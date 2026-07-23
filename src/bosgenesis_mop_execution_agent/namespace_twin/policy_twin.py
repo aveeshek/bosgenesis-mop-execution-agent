@@ -73,6 +73,25 @@ POLICY_BUNDLE_HASH = hashlib.sha256(
     json.dumps(POLICY_BUNDLE, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).hexdigest()
 
+RISK_THRESHOLDS = {
+    "green_max": 30,
+    "amber_min": 31,
+    "amber_max": 70,
+    "red_min": 71,
+    "red_max": 90,
+    "critical_min": 91,
+}
+
+
+def _risk_level(score: int) -> str:
+    if score <= RISK_THRESHOLDS["green_max"]:
+        return "low"
+    if score <= RISK_THRESHOLDS["amber_max"]:
+        return "medium"
+    if score <= RISK_THRESHOLDS["red_max"]:
+        return "high"
+    return "critical"
+
 
 def evaluate_policy_twin(
     *,
@@ -86,6 +105,7 @@ def evaluate_policy_twin(
     input_hash: str,
     target_namespace: str,
     pvc_risk_enabled: bool = False,
+    statefulset_risk_enabled: bool = False,
     evaluated_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Return a versioned, non-LLM preliminary decision projection."""
@@ -167,6 +187,7 @@ def evaluate_policy_twin(
         explicit_deletes=explicit_deletes,
         evidence_axis=evidence_axis,
         pvc_risk_enabled=pvc_risk_enabled,
+        statefulset_risk_enabled=statefulset_risk_enabled,
     )
     policy_axis = _policy_axis(findings)
     decision_projection = _decision_projection(
@@ -298,9 +319,7 @@ def finalize_policy_twin(
         break
     raw_score = sum(int(item.get("contribution") or 0) for item in risk_contributions)
     score = min(raw_score, 100)
-    level = (
-        "low" if score <= 29 else "medium" if score <= 69 else "high" if score < 90 else "critical"
-    )
+    level = _risk_level(score)
     risk_axis.update(
         {
             "level": level,
@@ -448,6 +467,7 @@ def _risk_axis(
     explicit_deletes: list[dict[str, Any]],
     evidence_axis: dict[str, Any],
     pvc_risk_enabled: bool,
+    statefulset_risk_enabled: bool,
 ) -> dict[str, Any]:
     active = [row for row in deltas if row.get("action") not in {"no_op", None}]
     diffs = [_diff(row) for row in active]
@@ -460,7 +480,8 @@ def _risk_axis(
                 for row in active
             )
         ),
-        "statefulset_change": any(row.get("kind") == "StatefulSet" for row in active),
+        "statefulset_change": statefulset_risk_enabled
+        and any(row.get("kind") == "StatefulSet" for row in active),
         "helm_release_upgrade": any(
             row.get("helm_release") and row.get("action") == "update" for row in active
         ),
@@ -496,6 +517,8 @@ def _risk_axis(
         reason = _risk_reason(rule, matched)
         if rule == "pvc_create_or_explicit_delete" and not pvc_risk_enabled:
             reason = "PVC risk evaluation is disabled by configuration for this MVP."
+        if rule == "statefulset_change" and not statefulset_risk_enabled:
+            reason = "StatefulSet risk evaluation is disabled by configuration for this MVP."
         contributions.append(
             {
                 "axis": "risk",
@@ -509,16 +532,17 @@ def _risk_axis(
             }
         )
     score = min(raw_score, 100)
-    level = (
-        "low" if score <= 29 else "medium" if score <= 69 else "high" if score < 90 else "critical"
-    )
+    level = _risk_level(score)
     return {
         "level": level,
         "score": score,
         "raw_score": raw_score,
         "rules_version": RISK_RULE_VERSION,
-        "thresholds": {"green_max": 29, "amber_min": 30, "amber_max": 69, "red_min": 70},
-        "feature_toggles": {"pvc_risk_enabled": pvc_risk_enabled},
+        "thresholds": dict(RISK_THRESHOLDS),
+        "feature_toggles": {
+            "pvc_risk_enabled": pvc_risk_enabled,
+            "statefulset_risk_enabled": statefulset_risk_enabled,
+        },
         "contributions": contributions,
     }
 
@@ -601,14 +625,14 @@ def _decision_projection(
     rules = [
         ("policy_deny_or_hard_block", policy_axis["verdict"] == "deny", "red"),
         ("authoritative_dry_run_failed", authoritative_dry_run_failed, "red"),
-        ("critical_unmitigated_risk", risk_axis["score"] >= 70, "red"),
+        ("critical_unmitigated_risk", risk_axis["score"] >= 71, "red"),
         ("approval_required", policy_axis["verdict"] == "approval_required", "amber"),
         (
             "partial_stale_or_unavailable_evidence",
             evidence_axis["classification"] in {"partial", "stale", "unavailable"},
             "amber",
         ),
-        ("risk_above_green_band", risk_axis["score"] >= 30, "amber"),
+        ("risk_above_green_band", risk_axis["score"] >= 31, "amber"),
         ("otherwise_green", True, "green"),
     ]
     selected = next(item for item in rules if item[1])

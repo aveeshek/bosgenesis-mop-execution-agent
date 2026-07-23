@@ -20,7 +20,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 SCHEMA_VERSION = "1.0.0"
 POLICY_VERSION = "namespace-twin-policy-2026.07.2"
-RISK_RULE_VERSION = "namespace-twin-risk-1.1.0"
+RISK_RULE_VERSION = "namespace-twin-risk-1.2.0"
 
 ACTIVE_STATES = {
     "requested",

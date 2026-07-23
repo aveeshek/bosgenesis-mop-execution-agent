@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from bosgenesis_mop_execution_agent.api.app import create_app
@@ -21,6 +22,8 @@ from bosgenesis_mop_execution_agent.namespace_twin.models import (
 from bosgenesis_mop_execution_agent.namespace_twin.persistence import NamespaceTwinRepository
 from bosgenesis_mop_execution_agent.namespace_twin.policy_twin import (
     POLICY_BUNDLE_HASH,
+    RISK_THRESHOLDS,
+    _risk_level,
     evaluate_policy_twin,
 )
 from bosgenesis_mop_execution_agent.namespace_twin.service import NamespaceTwinService
@@ -88,6 +91,8 @@ def test_real_policy_api_preserves_three_axes_and_preliminary_core_decision(tmp_
     assert data["risk_axis"]["rules_version"] == RISK_RULE_VERSION
     assert data["risk_axis"]["score"] == 20
     assert data["risk_axis"]["feature_toggles"]["pvc_risk_enabled"] is False
+    assert data["risk_axis"]["feature_toggles"]["statefulset_risk_enabled"] is False
+    assert data["risk_axis"]["thresholds"] == RISK_THRESHOLDS
     assert len(data["risk_axis"]["contributions"]) == 13
     assert data["decision_projection"]["level"] == "amber"
     assert data["decision_projection"]["precedence_rule"] == "approval_required"
@@ -163,6 +168,70 @@ def test_pvc_risk_is_disabled_by_default_and_can_be_enabled() -> None:
     assert enabled_rule["contribution"] == 30
     assert enabled["risk_axis"]["feature_toggles"]["pvc_risk_enabled"] is True
 
+
+def test_statefulset_risk_is_disabled_by_default_and_can_be_enabled() -> None:
+    bundle = load_and_validate_bundle(_source(), TARGET)
+    statefulset_delta = {
+        "resource_id": f"StatefulSet:{TARGET}:sample-stateful",
+        "kind": "StatefulSet",
+        "namespace": TARGET,
+        "name": "sample-stateful",
+        "action": "create",
+        "risk": "high",
+        "canonical_diff": "{}",
+        "reason": "StatefulSet is planned but absent from the target namespace.",
+        "evidence_refs": ["generated/statefulset.yaml"],
+    }
+    arguments = {
+        "bundle": bundle,
+        "planned_resources": [],
+        "deltas": [statefulset_delta],
+        "snapshot": LiveSnapshot(available=True, complete_kinds={"StatefulSet"}),
+        "provenance": {"artifact_index_present": True},
+        "graph_summary": {"missing": 0},
+        "explicit_deletes": [],
+        "input_hash": "e" * 64,
+        "target_namespace": TARGET,
+        "evaluated_at": datetime(2026, 7, 22, tzinfo=UTC),
+    }
+
+    disabled = evaluate_policy_twin(**arguments)
+    enabled = evaluate_policy_twin(**arguments, statefulset_risk_enabled=True)
+    disabled_rule = next(
+        item
+        for item in disabled["risk_axis"]["contributions"]
+        if item["rule"] == "statefulset_change"
+    )
+    enabled_rule = next(
+        item
+        for item in enabled["risk_axis"]["contributions"]
+        if item["rule"] == "statefulset_change"
+    )
+
+    assert disabled_rule["matched"] is False
+    assert disabled_rule["contribution"] == 0
+    assert "disabled by configuration" in disabled_rule["reason"]
+    assert disabled["risk_axis"]["feature_toggles"]["statefulset_risk_enabled"] is False
+    assert enabled_rule["matched"] is True
+    assert enabled_rule["contribution"] == 25
+    assert enabled["risk_axis"]["feature_toggles"]["statefulset_risk_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("score", "expected"),
+    [
+        (0, "low"),
+        (30, "low"),
+        (31, "medium"),
+        (70, "medium"),
+        (71, "high"),
+        (90, "high"),
+        (91, "critical"),
+        (100, "critical"),
+    ],
+)
+def test_risk_band_boundaries(score: int, expected: str) -> None:
+    assert _risk_level(score) == expected
 
 def test_inferred_helm_values_only_score_an_installed_release_delta() -> None:
     bundle = load_and_validate_bundle(_source(), TARGET)
