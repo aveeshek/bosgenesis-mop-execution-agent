@@ -347,6 +347,7 @@ def finalize_policy_twin(
     )
     return finalized
 
+
 def _policy_axis(findings: list[dict[str, Any]]) -> dict[str, Any]:
     hard_blocks = [item for item in findings if item["effect"] == "deny"]
     approvals = [item for item in findings if item["effect"] == "approval_required"]
@@ -529,9 +530,7 @@ def _has_inferred_helm_change(
     planned_resources: list[dict[str, Any]],
 ) -> bool:
     changed_releases = {
-        str(row.get("helm_release") or "").casefold()
-        for row in active
-        if row.get("helm_release")
+        str(row.get("helm_release") or "").casefold() for row in active if row.get("helm_release")
     }
     if not changed_releases:
         return False
@@ -542,8 +541,22 @@ def _has_inferred_helm_change(
             command_text = " ".join(
                 f"{command.kind} {command.command}" for command in step.commands
             ).casefold()
-            is_helm_step = "helm" in str(step.type).casefold() or "helm" in command_text
-            if _is_inferred_provenance(step.inference) and is_helm_step:
+            step_type = str(step.type).strip().casefold()
+            is_helm_change = step_type in {
+                "helm_install",
+                "helm_upgrade",
+                "helm_uninstall",
+                "helm_delete",
+            } or any(
+                token in command_text
+                for token in (
+                    "helm install ",
+                    "helm upgrade ",
+                    "helm uninstall ",
+                    "helm delete ",
+                )
+            )
+            if _is_inferred_provenance(step.inference) and is_helm_change:
                 inferred_helm_steps.append(step)
     if not inferred_helm_steps:
         return False
@@ -576,6 +589,7 @@ def _is_inferred_provenance(inference: dict[str, Any] | None) -> bool:
 
     label = str(inference.get("label") or "").strip().casefold()
     return label not in {"observed", "verified", "authoritative", "explicit"}
+
 
 def _decision_projection(
     *,
