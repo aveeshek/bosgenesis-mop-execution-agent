@@ -66,6 +66,8 @@ def test_real_policy_api_preserves_three_axes_and_preliminary_core_decision(tmp_
     service = NamespaceTwinService(
         NamespaceTwinRepository(f"sqlite+pysqlite:///{(tmp_path / 'phase5d.db').as_posix()}"),
         live_collector=FakeCollector(snapshot),
+        rollback_required=True,
+        auto_approval_enabled=False,
     )
     app = create_app()
     app.state.namespace_twin_service = service
@@ -232,6 +234,7 @@ def test_statefulset_risk_is_disabled_by_default_and_can_be_enabled() -> None:
 )
 def test_risk_band_boundaries(score: int, expected: str) -> None:
     assert _risk_level(score) == expected
+
 
 def test_inferred_helm_values_only_score_an_installed_release_delta() -> None:
     bundle = load_and_validate_bundle(_source(), TARGET)
@@ -517,6 +520,58 @@ def test_machine_plan_rollback_commands_prevent_false_missing_rollback() -> None
 
     assert rollback_rule["matched"] is False
     assert rollback_rule["contribution"] == 0
+
+
+def test_demo_profile_auto_approves_and_makes_rollback_non_applicable() -> None:
+    bundle = load_and_validate_bundle(_source(), TARGET)
+
+    assessment = evaluate_policy_twin(
+        bundle=bundle,
+        planned_resources=[],
+        deltas=[
+            {
+                "resource_id": f"ConfigMap:{TARGET}:sample-config",
+                "kind": "ConfigMap",
+                "namespace": TARGET,
+                "name": "sample-config",
+                "action": "create",
+                "risk": "medium",
+                "canonical_diff": "{}",
+                "reason": "ConfigMap is planned but absent.",
+                "evidence_refs": ["generated/configmap.yaml"],
+            }
+        ],
+        snapshot=LiveSnapshot(available=True, complete_kinds={"ConfigMap"}),
+        provenance={"artifact_index_present": True},
+        graph_summary={"missing": 0},
+        explicit_deletes=[],
+        input_hash="d" * 64,
+        target_namespace=TARGET,
+        rollback_required=False,
+        auto_approval_enabled=True,
+        evaluated_at=datetime(2026, 8, 15, tzinfo=UTC),
+    )
+
+    approval_requirements = assessment["policy_axis"]["approval_requirements"]
+    rollback_check = next(
+        check
+        for check in assessment["evidence_axis"]["checks"]
+        if check["code"] == "rollback_evidence"
+    )
+    rollback_risk = next(
+        item
+        for item in assessment["risk_axis"]["contributions"]
+        if item["rule"] == "missing_rollback_step"
+    )
+
+    assert approval_requirements == []
+    assert assessment["feature_toggles"] == {
+        "rollback_required": False,
+        "auto_approval_enabled": True,
+    }
+    assert rollback_check["satisfied"] is True
+    assert rollback_risk["matched"] is False
+    assert rollback_risk["contribution"] == 0
 
 
 def test_existing_policy_engine_hard_block_has_red_precedence() -> None:

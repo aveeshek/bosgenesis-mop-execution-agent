@@ -1843,9 +1843,25 @@ def _materialize_uploaded_bundle_source(source: Any) -> Any:
     filename = Path(str(source.get("filename") or "mop-bundle.zip")).name
     if not filename.lower().endswith(".zip"):
         filename = f"{filename}.zip"
-    root = Path(tempfile.mkdtemp(prefix="mop-exec-upload-"))
+    configured_bundle_root = os.getenv("MOP_EXECUTION_BUNDLE_ROOT")
+    if configured_bundle_root:
+        upload_root = Path(configured_bundle_root) / "uploads"
+    else:
+        artifact_root = os.getenv("ARTIFACT_ROOT_PATH")
+        upload_root = (
+            Path(artifact_root) / "uploads"
+            if artifact_root
+            else Path(tempfile.gettempdir())
+            / "bosgenesis-mop-execution-agent"
+            / "uploads"
+        )
+    root = upload_root / actual_sha256
+    root.mkdir(parents=True, exist_ok=True)
     archive = root / filename
-    archive.write_bytes(content)
+    if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != actual_sha256:
+        temporary_archive = root / f".{filename}.tmp"
+        temporary_archive.write_bytes(content)
+        temporary_archive.replace(archive)
     return {"type": "uploaded_zip", "value": str(archive)}
 
 

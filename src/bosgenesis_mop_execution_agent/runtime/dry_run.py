@@ -70,10 +70,24 @@ class DryRunExecutor:
         bundle_root: str | Path,
         k8s_client: KubernetesDryRunClient | None = None,
         helm_client: HelmDryRunClient | None = None,
+        excluded_kinds: set[str] | None = None,
+        excluded_names: set[str] | None = None,
+        excluded_name_prefixes: set[str] | None = None,
     ) -> None:
         self._bundle_root = Path(bundle_root)
         self._k8s_client = k8s_client
         self._helm_client = helm_client
+        self._excluded_kinds = {
+            kind.strip().lower() for kind in (excluded_kinds or set()) if kind.strip()
+        }
+        self._excluded_names = {
+            name.strip().casefold() for name in (excluded_names or set()) if name.strip()
+        }
+        self._excluded_name_prefixes = {
+            prefix.strip().casefold()
+            for prefix in (excluded_name_prefixes or set())
+            if prefix.strip()
+        }
 
     def execute(self, *, job: ExecutionJob, step: ExecutionStep) -> DryRunActionResult:
         """Map a plan step to one or more dry-run actions."""
@@ -94,13 +108,6 @@ class DryRunExecutor:
         job: ExecutionJob,
         step: ExecutionStep,
     ) -> DryRunActionResult:
-        if self._k8s_client is None:
-            return DryRunActionResult(
-                success=False,
-                action="k8s.server_side_dry_run_apply",
-                error_code=ErrorCode.MCP_UNAVAILABLE,
-                message="kubernetes_dry_run_client_missing",
-            )
         if not step.manifest_refs:
             return DryRunActionResult(
                 success=False,
@@ -129,6 +136,17 @@ class DryRunExecutor:
                 )
 
             for manifest in manifests:
+                if self._manifest_excluded(manifest):
+                    outputs.append(_excluded_manifest_output(manifest, artifact_ref=manifest_ref))
+                    continue
+                if self._k8s_client is None:
+                    return DryRunActionResult(
+                        success=False,
+                        action="k8s.server_side_dry_run_apply",
+                        outputs=outputs,
+                        error_code=ErrorCode.MCP_UNAVAILABLE,
+                        message="kubernetes_dry_run_client_missing",
+                    )
                 result = self._k8s_client.dry_run_apply(manifest, job.target_namespace)
                 outputs.append(self._mcp_output(result, artifact_ref=manifest_ref))
                 if not result.success:
@@ -146,6 +164,14 @@ class DryRunExecutor:
             success=True,
             action="k8s.server_side_dry_run_apply",
             outputs=outputs,
+        )
+
+    def _manifest_excluded(self, manifest: dict[str, Any]) -> bool:
+        if _manifest_kind(manifest) in self._excluded_kinds:
+            return True
+        name = str((manifest.get("metadata") or {}).get("name") or "").casefold()
+        return name in self._excluded_names or any(
+            name.startswith(prefix) for prefix in self._excluded_name_prefixes
         )
 
     def _execute_helm(
@@ -309,9 +335,7 @@ def _parse_helm_command(command: str) -> tuple[str | None, str | None]:
     else:
         return None, None
     positional = [
-        part
-        for part in parts[index:]
-        if not part.startswith("-") and part not in {"true", "false"}
+        part for part in parts[index:] if not part.startswith("-") and part not in {"true", "false"}
     ]
     if len(positional) < 2:
         return None, None
@@ -325,3 +349,26 @@ def _helm_metadata(step: ExecutionStep) -> dict[str, str]:
         if isinstance(value, str) and value:
             metadata[key] = value
     return metadata
+
+
+def _manifest_kind(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("kind") or "").strip().lower()
+
+
+def _excluded_manifest_output(
+    manifest: dict[str, Any],
+    *,
+    artifact_ref: str,
+) -> dict[str, Any]:
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    return {
+        "server": "execution-agent",
+        "tool": "manifest.skip_excluded_kind",
+        "success": True,
+        "artifact_ref": artifact_ref,
+        "data": {
+            "kind": manifest.get("kind"),
+            "name": metadata.get("name"),
+            "reason": "excluded_by_configuration",
+        },
+    }

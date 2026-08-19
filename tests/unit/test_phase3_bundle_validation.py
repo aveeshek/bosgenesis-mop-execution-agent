@@ -44,7 +44,9 @@ def test_sample_bundle_parses_machine_plan_first_and_loads_supporting_context(
     assert bundle.response_json is not None
 
 
-def test_uploaded_zip_source_resolves_and_validates(tmp_path: Path) -> None:
+def test_uploaded_zip_source_resolves_and_validates(tmp_path: Path, monkeypatch) -> None:
+    artifact_root = tmp_path / "persistent-artifacts"
+    monkeypatch.setenv("ARTIFACT_ROOT_PATH", str(artifact_root))
     bundle_root = _copy_sample_bundle(tmp_path)
     archive = tmp_path / "bundle.zip"
     with zipfile.ZipFile(archive, mode="w") as zip_file:
@@ -58,6 +60,14 @@ def test_uploaded_zip_source_resolves_and_validates(tmp_path: Path) -> None:
     )
 
     assert bundle.machine_plan.phase_ids == {"apply_configmaps"}
+    assert bundle.root_path.is_relative_to(artifact_root / "bundles")
+    assert (bundle.root_path.parent / ".complete").is_file()
+
+    reloaded = load_and_validate_bundle(
+        BundleSource(type=BundleSourceType.UPLOADED_ZIP, value=str(archive)),
+        target_namespace="sample-target",
+    )
+    assert reloaded.root_path == bundle.root_path
 
 
 def test_object_store_zip_source_resolves_and_validates(tmp_path: Path) -> None:

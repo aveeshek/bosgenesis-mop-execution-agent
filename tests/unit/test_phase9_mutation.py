@@ -4,11 +4,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bosgenesis_mop_execution_agent.mcp_clients.models import McpCallResult
+from bosgenesis_mop_execution_agent.mcp_clients.models import (
+    McpCallResult,
+    McpStructuredError,
+)
 from bosgenesis_mop_execution_agent.models import (
     ApprovalScope,
+    ErrorCode,
     ExecutionJob,
     ExecutionMode,
+    ExecutionStep,
     ExternalInstruction,
     HumanApproval,
     InstructionType,
@@ -18,6 +23,7 @@ from bosgenesis_mop_execution_agent.models import (
     ObservationType,
     PhaseStatus,
     StepState,
+    StepType,
 )
 from bosgenesis_mop_execution_agent.persistence import (
     AppendOnlyAuditWriter,
@@ -83,6 +89,66 @@ def test_approved_helm_install_upgrade_mutation_uses_helm_executor(tmp_path: Pat
             "timeout": None,
         }
     ]
+
+
+def test_ambiguous_helm_timeout_reconciles_deployed_release(tmp_path: Path) -> None:
+    bundle_root = Path("tests/fixtures/phase8_helm_failure")
+    helm_client = FakeHelmMutationClient(
+        install_result=_mcp_failure(
+            server_name="helm",
+            tool_name="release.install_upgrade",
+            error_code=ErrorCode.MCP_UNAVAILABLE,
+            message="HTTP 504 Gateway Time-out",
+        ),
+        status_result=_mcp_result(
+            server_name="helm",
+            tool_name="release.status",
+            data={
+                "status": "ok",
+                "output": {"name": "signoz", "info": {"status": "deployed"}},
+            },
+        ),
+    )
+    repo, runtime = _runtime(tmp_path, bundle_root=bundle_root, helm_client=helm_client)
+    job = _seed_job_from_plan(repo, runtime, bundle_root=bundle_root, target_namespace="signoz")
+    _approve_and_continue(repo, job, step_id="helm-render-failure")
+    runtime.enqueue(job.job_id)
+
+    assert runtime.run_once().action == "mutation_step_completed"
+    observation = _latest_mutation_observation(repo, job.job_id)
+    assert observation.result["resource_mutations"][0][
+        "reconciled_after_ambiguous_transport"
+    ] is True
+    assert helm_client.status_calls == [
+        {"release_name": "signoz", "namespace": "signoz"}
+    ]
+
+
+def test_ambiguous_helm_timeout_without_deployed_release_remains_unknown(
+    tmp_path: Path,
+) -> None:
+    bundle_root = Path("tests/fixtures/phase8_helm_failure")
+    helm_client = FakeHelmMutationClient(
+        install_result=_mcp_failure(
+            server_name="helm",
+            tool_name="release.install_upgrade",
+            error_code=ErrorCode.MCP_UNAVAILABLE,
+            message="HTTP 504 Gateway Time-out",
+        ),
+        status_result=_mcp_result(
+            server_name="helm",
+            tool_name="release.status",
+            data={"output": {"name": "signoz", "info": {"status": "failed"}}},
+        ),
+    )
+    repo, runtime = _runtime(tmp_path, bundle_root=bundle_root, helm_client=helm_client)
+    job = _seed_job_from_plan(repo, runtime, bundle_root=bundle_root, target_namespace="signoz")
+    _approve_and_continue(repo, job, step_id="helm-render-failure")
+    runtime.enqueue(job.job_id)
+
+    assert runtime.run_once().action == "decision_required"
+    observation = _latest_mutation_observation(repo, job.job_id)
+    assert observation.result["unknown_mutation_outcome"] is True
 
 
 def test_mutation_gates_block_missing_dry_run_approval_scope_and_namespace(
@@ -198,6 +264,147 @@ def test_duplicate_continue_instruction_idempotency_replays_same_request(tmp_pat
     assert runtime.run_once().action == "mutation_step_completed"
     assert len(k8s_client.calls) == 1
 
+
+def test_mutation_skips_excluded_ingress_but_applies_other_manifests(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "mixed.yaml"
+    manifest_path.write_text(
+        """apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-ingress
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-config
+data:
+  mode: demo
+""",
+        encoding="utf-8",
+    )
+    client = FakeK8sMutationClient()
+    executor = MutationExecutor(
+        bundle_root=tmp_path,
+        k8s_client=client,
+        audit_writer=AppendOnlyAuditWriter(JsonExecutionRepository(tmp_path / "audit.json")),
+        excluded_kinds={"Ingress"},
+    )
+    job = ExecutionJob(
+        job_id="job-1",
+        bundle_id="bundle-1",
+        target_namespace="agent-testing",
+        execution_mode=ExecutionMode.EXECUTE_AFTER_APPROVAL,
+        state=JobState.EXECUTING,
+        dry_run_satisfied=True,
+    )
+    step = ExecutionStep(
+        step_id="mixed-step",
+        job_id=job.job_id,
+        phase_id="apply",
+        sequence_index=0,
+        type=StepType.K8S_APPLY,
+        manifest_refs=["mixed.yaml"],
+        commands=[
+            {
+                "kind": "apply",
+                "command": "kubectl apply -f mixed.yaml -n agent-testing",
+                "dry_run": False,
+                "mutating": True,
+            }
+        ],
+        state=StepState.DRY_RUN_SUCCEEDED,
+        dry_run_status=StepState.DRY_RUN_SUCCEEDED,
+    )
+    approval = _approval(
+        job,
+        step_id=step.step_id,
+        command=_mutating_command(step.commands),
+    )
+    instruction = ExternalInstruction(
+        instruction_id="instruction-ingress-exclusion",
+        job_id=job.job_id,
+        instruction_type=InstructionType.CONTINUE,
+        controller_id="codex",
+        issued_by="codex",
+        issued_at=NOW,
+        target_step_id=step.step_id,
+    )
+
+    result = executor.execute(
+        job=job,
+        step=step,
+        approvals=[approval],
+        instructions=[instruction],
+    )
+
+    assert result.success is True
+    assert [call["manifest"]["kind"] for call in client.calls] == ["ConfigMap"]
+    assert result.outputs[0]["tool"] == "manifest.skip_excluded_kind"
+    assert result.resource_mutations[0]["kind"] == "ConfigMap"
+
+
+def test_mutation_all_excluded_ingress_manifests_complete_without_client(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "ingress.yaml"
+    manifest_path.write_text(
+        """apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-ingress
+""",
+        encoding="utf-8",
+    )
+    executor = MutationExecutor(
+        bundle_root=tmp_path,
+        audit_writer=AppendOnlyAuditWriter(JsonExecutionRepository(tmp_path / "audit.json")),
+        excluded_kinds={"ingress"},
+    )
+    job = ExecutionJob(
+        job_id="job-1",
+        bundle_id="bundle-1",
+        target_namespace="agent-testing",
+        execution_mode=ExecutionMode.EXECUTE_AFTER_APPROVAL,
+        state=JobState.EXECUTING,
+        dry_run_satisfied=True,
+    )
+    step = ExecutionStep(
+        step_id="ingress-step",
+        job_id=job.job_id,
+        phase_id="apply",
+        sequence_index=0,
+        type=StepType.K8S_APPLY,
+        manifest_refs=["ingress.yaml"],
+        commands=[
+            {
+                "kind": "apply",
+                "command": "kubectl apply -f ingress.yaml -n agent-testing",
+                "dry_run": False,
+                "mutating": True,
+            }
+        ],
+        state=StepState.DRY_RUN_SUCCEEDED,
+        dry_run_status=StepState.DRY_RUN_SUCCEEDED,
+    )
+
+    instruction = ExternalInstruction(
+        instruction_id="instruction-ingress-only",
+        job_id=job.job_id,
+        instruction_type=InstructionType.CONTINUE,
+        controller_id="codex",
+        issued_by="codex",
+        issued_at=NOW,
+        target_step_id=step.step_id,
+    )
+
+    result = executor.execute(
+        job=job,
+        step=step,
+        approvals=[],
+        instructions=[instruction],
+    )
+
+    assert result.success is True
+    assert result.message == "all_manifests_excluded_by_configuration"
+    assert result.outputs[0]["tool"] == "manifest.skip_excluded_kind"
 
 def _runtime(
     tmp_path: Path,
@@ -398,8 +605,16 @@ class FakeK8sMutationClient:
 
 
 class FakeHelmMutationClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        install_result: McpCallResult | None = None,
+        status_result: McpCallResult | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.status_calls: list[dict[str, str]] = []
+        self.install_result = install_result
+        self.status_result = status_result
 
     def install_upgrade(
         self,
@@ -425,11 +640,46 @@ class FakeHelmMutationClient:
                 "timeout": timeout,
             }
         )
-        return _mcp_result(
+        return self.install_result or _mcp_result(
             server_name="helm",
             tool_name="release.install_upgrade",
             data={"release_name": release_name, "chart": chart, "namespace": namespace},
         )
+
+    def status(self, *, release_name: str, namespace: str) -> McpCallResult:
+        self.status_calls.append({"release_name": release_name, "namespace": namespace})
+        return self.status_result or _mcp_result(
+            server_name="helm",
+            tool_name="release.status",
+            data={"name": release_name, "status": "deployed"},
+        )
+
+
+def _mcp_failure(
+    *,
+    server_name: str,
+    tool_name: str,
+    error_code: ErrorCode,
+    message: str,
+) -> McpCallResult:
+    return McpCallResult(
+        server_name=server_name,
+        tool_name=tool_name,
+        success=False,
+        error=McpStructuredError(
+            error_code=error_code,
+            message=message,
+            retryable=error_code in {ErrorCode.TIMEOUT_EXCEEDED, ErrorCode.MCP_UNAVAILABLE},
+        ),
+        observation=Observation(
+            observation_id=f"obs-{server_name}-{tool_name}-failed",
+            job_id="job-1",
+            severity=ObservationSeverity.ERROR,
+            observation_type=ObservationType.MCP_CALL_RESULT,
+            summary=message,
+            result={},
+        ),
+    )
 
 
 def _mcp_result(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1352,6 +1353,9 @@ class NamespaceTwinRepository:
 
     @staticmethod
     def _run_dict(row: NamespaceTwinRunRow) -> dict[str, Any]:
+        source_reference_hash = hashlib.sha256(
+            f"{row.source_type}:{row.source_value_redacted}".encode()
+        ).hexdigest()
         return {
             "schema_version": "1.0.0",
             "twin_id": row.twin_id,
@@ -1362,6 +1366,7 @@ class NamespaceTwinRepository:
             "decision_version": row.decision_version,
             "decision_is_final": row.decision_is_final,
             "source_type": row.source_type,
+            "source_reference_hash": source_reference_hash,
             "source_namespace": row.source_namespace,
             "target_cluster": row.target_cluster,
             "target_namespace": row.target_namespace,

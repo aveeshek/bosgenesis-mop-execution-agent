@@ -33,6 +33,7 @@ def test_real_provisional_twin_is_idempotent_ordered_and_redacted(tmp_path) -> N
     assert first["decision"] == "pending"
     assert first["decision_is_final"] is False
     assert first["input_hash"]
+    assert len(first["source_reference_hash"]) == 64
     assert first["policy_version"]
     assert first["risk_rule_version"]
     assert replay["twin_id"] == first["twin_id"]

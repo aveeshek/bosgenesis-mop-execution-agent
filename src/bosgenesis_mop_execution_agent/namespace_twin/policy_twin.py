@@ -106,6 +106,8 @@ def evaluate_policy_twin(
     target_namespace: str,
     pvc_risk_enabled: bool = False,
     statefulset_risk_enabled: bool = False,
+    rollback_required: bool = True,
+    auto_approval_enabled: bool = False,
     evaluated_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Return a versioned, non-LLM preliminary decision projection."""
@@ -145,7 +147,10 @@ def evaluate_policy_twin(
 
     findings = _policy_findings(decision.blocks)
     findings.extend(_privileged_findings(bundle))
-    if bundle.machine_plan.executor_contract.human_approval_before_mutation:
+    if (
+        bundle.machine_plan.executor_contract.human_approval_before_mutation
+        and not auto_approval_enabled
+    ):
         findings.append(
             _finding(
                 "HUMAN_APPROVAL_REQUIRED",
@@ -179,6 +184,7 @@ def evaluate_policy_twin(
         graph_summary=graph_summary,
         bundle=bundle,
         now=now,
+        rollback_required=rollback_required,
     )
     risk_axis = _risk_axis(
         deltas=deltas,
@@ -188,6 +194,7 @@ def evaluate_policy_twin(
         evidence_axis=evidence_axis,
         pvc_risk_enabled=pvc_risk_enabled,
         statefulset_risk_enabled=statefulset_risk_enabled,
+        rollback_required=rollback_required,
     )
     policy_axis = _policy_axis(findings)
     decision_projection = _decision_projection(
@@ -228,6 +235,10 @@ def evaluate_policy_twin(
         ],
         "command_fingerprint_hash": decision.command_fingerprint,
         "dry_run_job_id": None,
+        "feature_toggles": {
+            "rollback_required": rollback_required,
+            "auto_approval_enabled": auto_approval_enabled,
+        },
         "model_authority": False,
     }
 
@@ -389,6 +400,7 @@ def _evidence_axis(
     graph_summary: dict[str, Any],
     bundle: ArtifactBundle,
     now: datetime,
+    rollback_required: bool,
 ) -> dict[str, Any]:
     has_rollback = _has_rollback(bundle)
     checks = [
@@ -412,13 +424,17 @@ def _evidence_axis(
         ),
         _evidence_check(
             "rollback_evidence",
-            has_rollback,
+            has_rollback or not rollback_required,
             (
                 "The machine plan includes a rollback or cleanup step."
                 if has_rollback
-                else "The machine plan does not include a rollback or cleanup step."
+                else (
+                    "Rollback evidence is not applicable under the configured demo profile."
+                    if not rollback_required
+                    else "The machine plan does not include a rollback or cleanup step."
+                )
             ),
-            ["machine_execution_plan.yaml"],
+            ["machine_execution_plan.yaml"] if rollback_required else [],
         ),
         _evidence_check(
             "authoritative_dry_run",
@@ -468,6 +484,7 @@ def _risk_axis(
     evidence_axis: dict[str, Any],
     pvc_risk_enabled: bool,
     statefulset_risk_enabled: bool,
+    rollback_required: bool,
 ) -> dict[str, Any]:
     active = [row for row in deltas if row.get("action") not in {"no_op", None}]
     diffs = [_diff(row) for row in active]
@@ -497,7 +514,9 @@ def _risk_axis(
             for row, diff in zip(active, diffs, strict=True)
         ),
         "large_replica_change": any(_large_replica_change(diff) for diff in diffs),
-        "missing_rollback_step": bool(active or explicit_deletes) and not _has_rollback(bundle),
+        "missing_rollback_step": (
+            rollback_required and bool(active or explicit_deletes) and not _has_rollback(bundle)
+        ),
         "inferred_chart_or_value": _has_inferred_helm_change(
             active=active,
             bundle=bundle,
@@ -542,6 +561,7 @@ def _risk_axis(
         "feature_toggles": {
             "pvc_risk_enabled": pvc_risk_enabled,
             "statefulset_risk_enabled": statefulset_risk_enabled,
+            "rollback_required": rollback_required,
         },
         "contributions": contributions,
     }

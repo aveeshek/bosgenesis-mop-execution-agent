@@ -28,4 +28,9 @@ namespace_twin:
     - kube-root-ca.crt
   configmap_exclude_prefixes:
     - istio-
+  excluded_kinds:
+    - Ingress
+  rollback_required: false
+  auto_approval_enabled: true
   pvc_risk_enabled: false
+  statefulset_risk_enabled: false

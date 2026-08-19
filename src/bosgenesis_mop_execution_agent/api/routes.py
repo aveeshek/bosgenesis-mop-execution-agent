@@ -154,6 +154,14 @@ async def submit_approval(
 async def get_plan(job_id: str, service: ApiServiceDep) -> JSONResponse:
     return _response(service.get_plan(job_id))
 
+
+@router.get("/execution-jobs/{job_id}/decision-required")
+async def get_next_required_decision(
+    job_id: str,
+    service: ApiServiceDep,
+) -> JSONResponse:
+    return _response(service.next_required_decision(job_id))
+
 @router.get("/execution-jobs/{job_id}/dry-run-evidence")
 async def get_dry_run_evidence(job_id: str, service: ApiServiceDep) -> JSONResponse:
     return _response(service.namespace_twin_dry_run_evidence(job_id))

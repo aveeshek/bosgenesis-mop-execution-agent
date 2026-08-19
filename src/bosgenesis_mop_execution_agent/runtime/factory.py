@@ -51,7 +51,23 @@ def create_dry_run_executor(job: ExecutionJob) -> DryRunExecutor | None:
     if root is None:
         return None
     k8s_client, helm_client = _mcp_clients(job)
-    return DryRunExecutor(bundle_root=root, k8s_client=k8s_client, helm_client=helm_client)
+    return DryRunExecutor(
+        bundle_root=root,
+        k8s_client=k8s_client,
+        helm_client=helm_client,
+        excluded_kinds=_env_csv_set(
+            "MOP_EXECUTION_EXCLUDED_K8S_KINDS",
+            default={"Ingress"},
+        ),
+        excluded_names=_env_csv_set(
+            "MOP_EXECUTION_EXCLUDED_K8S_NAMES",
+            default={"kube-root-ca.crt"},
+        ),
+        excluded_name_prefixes=_env_csv_set(
+            "MOP_EXECUTION_EXCLUDED_K8S_NAME_PREFIXES",
+            default={"istio-"},
+        ),
+    )
 
 
 def create_mutation_executor(
@@ -67,6 +83,18 @@ def create_mutation_executor(
         k8s_client=k8s_client,
         helm_client=helm_client,
         audit_writer=AppendOnlyAuditWriter(repository),
+        excluded_kinds=_env_csv_set(
+            "MOP_EXECUTION_EXCLUDED_K8S_KINDS",
+            default={"Ingress"},
+        ),
+        excluded_names=_env_csv_set(
+            "MOP_EXECUTION_EXCLUDED_K8S_NAMES",
+            default={"kube-root-ca.crt"},
+        ),
+        excluded_name_prefixes=_env_csv_set(
+            "MOP_EXECUTION_EXCLUDED_K8S_NAME_PREFIXES",
+            default={"istio-"},
+        ),
     )
 
 
@@ -139,3 +167,9 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_csv_set(name: str, *, default: set[str]) -> set[str]:
+    raw = os.getenv(name)
+    values = raw.split(",") if raw is not None else default
+    return {str(value).strip() for value in values if str(value).strip()}

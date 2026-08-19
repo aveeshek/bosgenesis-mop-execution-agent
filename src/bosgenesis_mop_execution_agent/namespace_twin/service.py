@@ -75,6 +75,7 @@ from bosgenesis_mop_execution_agent.security import redact_value
 
 DEFAULT_TWIN_CONFIGMAP_EXCLUDE_NAMES = ("kube-root-ca.crt",)
 DEFAULT_TWIN_CONFIGMAP_EXCLUDE_PREFIXES = ("istio-",)
+DEFAULT_TWIN_EXCLUDED_KINDS = ("Ingress",)
 TWIN_RENDERED_HELM_KINDS = {
     "ConfigMap",
     "CronJob",
@@ -130,6 +131,9 @@ class NamespaceTwinService:
         statefulset_risk_enabled: bool | None = None,
         configmap_exclude_names: tuple[str, ...] | None = None,
         configmap_exclude_prefixes: tuple[str, ...] | None = None,
+        excluded_kinds: tuple[str, ...] | None = None,
+        rollback_required: bool | None = None,
+        auto_approval_enabled: bool | None = None,
     ) -> None:
         self.repository = repository or NamespaceTwinRepository()
         self.live_collector = live_collector or KubernetesLiveSnapshotCollector.from_environment()
@@ -153,6 +157,22 @@ class NamespaceTwinService:
         self.configmap_exclude_prefixes = configmap_exclude_prefixes or _csv_property(
             "NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_PREFIXES",
             DEFAULT_TWIN_CONFIGMAP_EXCLUDE_PREFIXES,
+        )
+        self.excluded_kinds = excluded_kinds or _csv_property(
+            "NAMESPACE_TWIN_EXCLUDED_KINDS",
+            DEFAULT_TWIN_EXCLUDED_KINDS,
+        )
+        self.rollback_required = (
+            rollback_required
+            if rollback_required is not None
+            else os.getenv("NAMESPACE_TWIN_ROLLBACK_REQUIRED", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.auto_approval_enabled = (
+            auto_approval_enabled
+            if auto_approval_enabled is not None
+            else os.getenv("NAMESPACE_TWIN_AUTO_APPROVAL_ENABLED", "true").strip().lower()
+            in {"1", "true", "yes", "on"}
         )
         self._reconcile_lock = RLock()
         self.recovered_twin_ids = self.repository.recover_non_terminal()
@@ -215,8 +235,23 @@ class NamespaceTwinService:
                 target_namespace=target_namespace,
                 pvc_risk_enabled=self.pvc_risk_enabled,
                 statefulset_risk_enabled=self.statefulset_risk_enabled,
+                rollback_required=self.rollback_required,
+                auto_approval_enabled=self.auto_approval_enabled,
             )
             rollback_twin = assess_rollback_twin(bundle)
+            if not self.rollback_required:
+                rollback_twin = {
+                    **rollback_twin,
+                    "applicability": "not_applicable",
+                    "confidence": "not_applicable",
+                    "confidence_score": 100,
+                    "summary": (
+                        "Rollback evidence is not applicable under the configured "
+                        "demo profile."
+                    ),
+                    "gaps": [],
+                    "execution_effect": "not_applicable",
+                }
             runtime_context = self._collect_runtime_context(
                 target_namespace, correlation_id=f"twin-runtime-{uuid4().hex}"
             )
@@ -291,6 +326,9 @@ class NamespaceTwinService:
                     "planned_helm_installs": sorted(planned_helm_installs),
                     "configmap_exclude_names": list(self.configmap_exclude_names),
                     "configmap_exclude_prefixes": list(self.configmap_exclude_prefixes),
+                    "excluded_kinds": list(self.excluded_kinds),
+                    "rollback_required": self.rollback_required,
+                    "auto_approval_enabled": self.auto_approval_enabled,
                     "configmap_bundle_debt": (
                         "Platform-managed ConfigMaps remain in source bundles but are excluded "
                         "from Namespace Twin planning until bundle generation can classify them."
@@ -689,8 +727,12 @@ class NamespaceTwinService:
 
         module_modes = dict(facts.get("module_modes") or {})
         module_modes["dry-run"] = "real_core"
-        module_modes["rollback"] = "real_core"
-        rollback_twin = enrich_rollback_proof(dict(facts.get("rollback_twin") or {}), evidence)
+        rollback_twin = dict(facts.get("rollback_twin") or {})
+        if rollback_twin.get("applicability") == "not_applicable":
+            module_modes["rollback"] = "not_applicable"
+        else:
+            module_modes["rollback"] = "real_core"
+            rollback_twin = enrich_rollback_proof(rollback_twin, evidence)
         simulation = dict(facts.get("simulation") or {})
         attached_facts = {
             "module_modes": module_modes,
@@ -704,9 +746,7 @@ class NamespaceTwinService:
                 {
                     **simulation,
                     "state": (
-                        "completed"
-                        if evidence_status == "passed"
-                        else "completed_with_findings"
+                        "completed" if evidence_status == "passed" else "completed_with_findings"
                     ),
                     "evidence_status": evidence_status,
                     "completed_at": datetime.now(UTC).isoformat(),
@@ -912,9 +952,7 @@ class NamespaceTwinService:
                 "evidence_refs": list(evidence.get("evidence_refs") or []),
                 "fidelity_limitations": list(evidence.get("fidelity_limitations") or []),
                 "fidelity_contract": dict(evidence.get("fidelity_contract") or {}),
-                "fidelity_demonstrations": list(
-                    evidence.get("fidelity_demonstrations") or []
-                ),
+                "fidelity_demonstrations": list(evidence.get("fidelity_demonstrations") or []),
                 "artifacts": list(evidence.get("reports") or []),
                 "failed_steps": list(evidence.get("failed_steps") or []),
                 "partial_steps": list(evidence.get("partial_steps") or []),
@@ -2663,7 +2701,7 @@ class NamespaceTwinService:
                 target_namespace=bundle.target_namespace,
                 source="bundle_manifest",
             )
-            if self._excluded_configmap(resource):
+            if self._excluded_resource(resource):
                 ignored.add(Path(manifest.path).as_posix())
         return ignored
 
@@ -2699,7 +2737,7 @@ class NamespaceTwinService:
         selected: dict[str, dict[str, Any]] = {}
         for resource in candidates:
             manifest = (resource.get("payload_redacted") or {}).get("manifest") or {}
-            if self._excluded_configmap(resource):
+            if self._excluded_resource(resource):
                 continue
             if self._excluded_helm_resource(
                 manifest,
@@ -2823,6 +2861,12 @@ class NamespaceTwinService:
             return path.relative_to(bundle.root_path.resolve()).as_posix()
         except ValueError:
             return path.name
+
+    def _excluded_resource(self, resource: dict[str, Any]) -> bool:
+        kind = str(resource.get("kind") or "").casefold()
+        if kind in {item.casefold() for item in self.excluded_kinds}:
+            return True
+        return self._excluded_configmap(resource)
 
     def _excluded_configmap(self, resource: dict[str, Any]) -> bool:
         if str(resource.get("kind") or "") != "ConfigMap":

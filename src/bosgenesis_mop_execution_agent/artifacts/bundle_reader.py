@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -15,6 +19,9 @@ from bosgenesis_mop_execution_agent.artifacts.models import BundleSource, Bundle
 
 class BundleSourceResolutionError(ValueError):
     """Raised when a bundle source cannot be resolved."""
+
+
+_BUNDLE_EXTRACTION_LOCK = threading.Lock()
 
 
 def resolve_bundle_source(source: BundleSource) -> Path:
@@ -61,19 +68,60 @@ def read_json_file(path: str | Path) -> dict[str, Any]:
 
 
 def _extract_zip_safely(archive: Path) -> Path:
-    target = Path(tempfile.mkdtemp(prefix="mop-exec-bundle-"))
-    with zipfile.ZipFile(archive) as zip_file:
-        for member in zip_file.infolist():
-            member_path = Path(member.filename)
-            if member_path.is_absolute() or ".." in member_path.parts:
-                raise BundleSourceResolutionError(f"unsafe_zip_member:{member.filename}")
-            if member.is_dir():
-                continue
-            destination = target / member_path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with zip_file.open(member) as source, destination.open("wb") as output:
-                output.write(source.read())
+    digest = _sha256_file(archive)
+    bundle_root = _bundle_storage_root() / digest
+    target = bundle_root / "extracted"
+    marker = bundle_root / ".complete"
+
+    with _BUNDLE_EXTRACTION_LOCK:
+        if target.is_dir() and marker.is_file():
+            return target
+
+        bundle_root.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.rmtree(target)
+        staging = Path(tempfile.mkdtemp(prefix=".extracting-", dir=str(bundle_root)))
+        try:
+            with zipfile.ZipFile(archive) as zip_file:
+                for member in zip_file.infolist():
+                    member_path = Path(member.filename)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise BundleSourceResolutionError(f"unsafe_zip_member:{member.filename}")
+                    if member.is_dir():
+                        continue
+                    destination = staging / member_path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with zip_file.open(member) as source, destination.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+            staging.replace(target)
+            marker.write_text(digest, encoding="ascii")
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
     return target
+
+
+def _bundle_storage_root() -> Path:
+    configured = os.getenv("MOP_EXECUTION_BUNDLE_ROOT")
+    if configured:
+        root = Path(configured)
+    else:
+        artifact_root = os.getenv("ARTIFACT_ROOT_PATH")
+        root = (
+            Path(artifact_root) / "bundles"
+            if artifact_root
+            else Path(tempfile.gettempdir()) / "bosgenesis-mop-execution-agent" / "bundles"
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _resolve_object_store(value: str) -> Path:

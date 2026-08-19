@@ -70,6 +70,9 @@ def test_artifact_bundle_job_control_and_retrieval_endpoints() -> None:
     assert job_state == "validating_bundle"
     plan = client.get(f"/v1/execution-jobs/{job_id}/plan").json()["data"]["plan"]
     assert plan["phases"][0]["phase_id"] == "apply_configmaps"
+    decision = client.get(f"/v1/execution-jobs/{job_id}/decision-required").json()
+    assert decision["ok"] is True
+    assert decision["data"]["next_required_decision"] is None
     assert client.get(f"/v1/execution-jobs/{job_id}/observations").json()["ok"] is True
     dry_run_evidence = client.get(
         f"/v1/execution-jobs/{job_id}/dry-run-evidence"

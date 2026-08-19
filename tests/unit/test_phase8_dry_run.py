@@ -160,6 +160,74 @@ def test_helm_step_metadata_is_forwarded_to_helm_client(tmp_path: Path) -> None:
     assert helm_client.dry_run_kwargs[-1]["repo_url"] == "https://charts.signoz.io"
 
 
+def test_dry_run_skips_excluded_ingress_but_checks_other_manifests(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "mixed.yaml"
+    manifest_path.write_text(
+        """apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-ingress
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-config
+data:
+  mode: demo
+""",
+        encoding="utf-8",
+    )
+    client = FakeK8sClient()
+    executor = DryRunExecutor(
+        bundle_root=tmp_path,
+        k8s_client=client,
+        excluded_kinds={"Ingress"},
+    )
+    step = ExecutionStep(
+        step_id="mixed-step",
+        job_id="job-1",
+        phase_id="apply",
+        sequence_index=0,
+        type=StepType.K8S_APPLY,
+        manifest_refs=["mixed.yaml"],
+    )
+
+    result = executor.execute(job=_job(target_namespace="agent-testing"), step=step)
+
+    assert result.success is True
+    assert [call["manifest"]["kind"] for call in client.calls] == ["ConfigMap"]
+    assert result.outputs[0]["tool"] == "manifest.skip_excluded_kind"
+    assert result.outputs[0]["data"]["kind"] == "Ingress"
+
+
+def test_dry_run_all_excluded_ingress_manifests_need_no_k8s_client(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "ingress.yaml"
+    manifest_path.write_text(
+        """apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-ingress
+""",
+        encoding="utf-8",
+    )
+    executor = DryRunExecutor(
+        bundle_root=tmp_path,
+        excluded_kinds={"ingress"},
+    )
+    step = ExecutionStep(
+        step_id="ingress-step",
+        job_id="job-1",
+        phase_id="apply",
+        sequence_index=0,
+        type=StepType.K8S_APPLY,
+        manifest_refs=["ingress.yaml"],
+    )
+
+    result = executor.execute(job=_job(target_namespace="agent-testing"), step=step)
+
+    assert result.success is True
+    assert result.outputs[0]["tool"] == "manifest.skip_excluded_kind"
+
 def _runtime(
     tmp_path: Path,
     *,

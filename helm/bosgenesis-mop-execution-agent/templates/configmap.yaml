@@ -17,6 +17,9 @@ data:
   HUMAN_APPROVAL_BEFORE_MUTATION: {{ .Values.config.humanApprovalBeforeMutation | quote }}
   NO_SECRET_VALUES: {{ .Values.config.noSecretValues | quote }}
   NO_PRODUCTION_DATA: {{ .Values.config.noProductionData | quote }}
+  MOP_EXECUTION_EXCLUDED_K8S_KINDS: {{ .Values.config.excludedK8sKinds | quote }}
+  MOP_EXECUTION_EXCLUDED_K8S_NAMES: {{ .Values.config.excludedK8sNames | quote }}
+  MOP_EXECUTION_EXCLUDED_K8S_NAME_PREFIXES: {{ .Values.config.excludedK8sNamePrefixes | quote }}
   MAX_JOB_DURATION_SECONDS: {{ .Values.config.maxJobDurationSeconds | quote }}
   DEFAULT_STEP_TIMEOUT_SECONDS: {{ .Values.config.defaultStepTimeoutSeconds | quote }}
   DEFAULT_WAIT_POLL_INTERVAL_SECONDS: {{ .Values.config.defaultWaitPollIntervalSeconds | quote }}
@@ -41,6 +44,9 @@ data:
   NAMESPACE_TWIN_HELM_IGNORE_PREFIXES: {{ .Values.config.namespaceTwinHelmIgnorePrefixes | quote }}
   NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_NAMES: {{ .Values.config.namespaceTwinConfigMapExcludeNames | quote }}
   NAMESPACE_TWIN_CONFIGMAP_EXCLUDE_PREFIXES: {{ .Values.config.namespaceTwinConfigMapExcludePrefixes | quote }}
+  NAMESPACE_TWIN_EXCLUDED_KINDS: {{ .Values.config.namespaceTwinExcludedKinds | quote }}
+  NAMESPACE_TWIN_ROLLBACK_REQUIRED: {{ .Values.config.namespaceTwinRollbackRequired | quote }}
+  NAMESPACE_TWIN_AUTO_APPROVAL_ENABLED: {{ .Values.config.namespaceTwinAutoApprovalEnabled | quote }}
   NAMESPACE_TWIN_PVC_RISK_ENABLED: {{ .Values.config.namespaceTwinPvcRiskEnabled | quote }}
   NAMESPACE_TWIN_STATEFULSET_RISK_ENABLED: {{ .Values.config.namespaceTwinStatefulSetRiskEnabled | quote }}
   HELM_MANAGER_MCP_ENDPOINT: {{ .Values.config.helmManagerMcpEndpoint | quote }}

@@ -50,6 +50,9 @@ class HelmMutationClient(Protocol):
     ) -> McpCallResult:
         """Install or upgrade a Helm release."""
 
+    def status(self, *, release_name: str, namespace: str) -> McpCallResult:
+        """Read the current status of a Helm release."""
+
 
 @dataclass(frozen=True)
 class MutationActionResult:
@@ -75,11 +78,33 @@ class MutationExecutor:
         k8s_client: KubernetesMutationClient | None = None,
         helm_client: HelmMutationClient | None = None,
         audit_writer: AppendOnlyAuditWriter,
+        excluded_kinds: set[str] | None = None,
+        excluded_names: set[str] | None = None,
+        excluded_name_prefixes: set[str] | None = None,
     ) -> None:
         self._bundle_root = Path(bundle_root)
         self._k8s_client = k8s_client
         self._helm_client = helm_client
         self._audit_writer = audit_writer
+        self._excluded_kinds = {
+            kind.strip().lower() for kind in (excluded_kinds or set()) if kind.strip()
+        }
+        self._excluded_names = {
+            name.strip().casefold() for name in (excluded_names or set()) if name.strip()
+        }
+        self._excluded_name_prefixes = {
+            prefix.strip().casefold()
+            for prefix in (excluded_name_prefixes or set())
+            if prefix.strip()
+        }
+
+    def _manifest_excluded(self, manifest: dict[str, Any]) -> bool:
+        if _manifest_kind(manifest) in self._excluded_kinds:
+            return True
+        name = str((manifest.get("metadata") or {}).get("name") or "").casefold()
+        return name in self._excluded_names or any(
+            name.startswith(prefix) for prefix in self._excluded_name_prefixes
+        )
 
     def execute(
         self,
@@ -117,8 +142,19 @@ class MutationExecutor:
         manifests_result = self._load_manifests(step)
         if isinstance(manifests_result, MutationActionResult):
             return manifests_result
-        manifests = manifests_result
-        resource_refs = _resource_refs(step, manifests, job.target_namespace)
+        excluded_manifests = [
+            manifest for manifest in manifests_result if self._manifest_excluded(manifest)
+        ]
+        manifests = [
+            manifest for manifest in manifests_result if not self._manifest_excluded(manifest)
+        ]
+        excluded_outputs = [_excluded_manifest_output(manifest) for manifest in excluded_manifests]
+        resource_refs = _resource_refs(
+            step,
+            manifests,
+            job.target_namespace,
+            excluded_kinds=self._excluded_kinds,
+        )
         request_payload = {
             "job_id": job.job_id,
             "step_id": step.step_id,
@@ -134,6 +170,13 @@ class MutationExecutor:
             correlation_id=job.correlation_id,
             trace_id=job.trace_id,
         )
+        if step.type == StepType.K8S_APPLY and not manifests:
+            return MutationActionResult(
+                success=True,
+                action="k8s.apply",
+                outputs=excluded_outputs,
+                message="all_manifests_excluded_by_configuration",
+            )
         self._write_pre_mutation_audit(job=job, step=step, command=command)
         decision = evaluate_policy(
             PolicyEvaluationContext(
@@ -165,7 +208,11 @@ class MutationExecutor:
             )
 
         if step.type == StepType.K8S_APPLY:
-            return self._execute_k8s_apply(job=job, manifests=manifests)
+            return self._execute_k8s_apply(
+                job=job,
+                manifests=manifests,
+                initial_outputs=excluded_outputs,
+            )
         if step.type in {StepType.HELM_INSTALL, StepType.HELM_UPGRADE}:
             return self._execute_helm(job=job, step=step)
         return MutationActionResult(
@@ -180,6 +227,7 @@ class MutationExecutor:
         *,
         job: ExecutionJob,
         manifests: list[dict[str, Any]],
+        initial_outputs: list[dict[str, Any]] | None = None,
     ) -> MutationActionResult:
         if self._k8s_client is None:
             return MutationActionResult(
@@ -188,7 +236,7 @@ class MutationExecutor:
                 error_code=ErrorCode.MCP_UNAVAILABLE,
                 message="kubernetes_mutation_client_missing",
             )
-        outputs: list[dict[str, Any]] = []
+        outputs: list[dict[str, Any]] = list(initial_outputs or [])
         mutations: list[dict[str, Any]] = []
         for manifest in manifests:
             try:
@@ -271,6 +319,21 @@ class MutationExecutor:
             }
         ]
         if not result.success:
+            if _is_ambiguous_helm_transport_failure(result):
+                status_result = self._helm_client.status(
+                    release_name=release_name,
+                    namespace=job.target_namespace,
+                )
+                outputs.append(_mcp_output(status_result))
+                if _helm_release_is_deployed(status_result, release_name=release_name):
+                    mutations[0]["reconciled_after_ambiguous_transport"] = True
+                    return MutationActionResult(
+                        success=True,
+                        action="helm.install_upgrade",
+                        outputs=outputs,
+                        resource_mutations=mutations,
+                        message="helm_install_upgrade_reconciled_as_deployed",
+                    )
             return MutationActionResult(
                 success=False,
                 action="helm.install_upgrade",
@@ -278,6 +341,7 @@ class MutationExecutor:
                 resource_mutations=mutations,
                 error_code=ErrorCode.UNKNOWN_ERROR,
                 message=result.error.message if result.error else "helm_install_upgrade_failed",
+                unknown_mutation_outcome=_is_ambiguous_helm_transport_failure(result),
             )
         return MutationActionResult(
             success=True,
@@ -378,6 +442,37 @@ class MutationExecutor:
         )
 
 
+def _is_ambiguous_helm_transport_failure(result: McpCallResult) -> bool:
+    error = result.error
+    return bool(
+        error
+        and (
+            error.retryable
+            or error.error_code in {ErrorCode.TIMEOUT_EXCEEDED, ErrorCode.MCP_UNAVAILABLE}
+        )
+    )
+
+
+def _helm_release_is_deployed(result: McpCallResult, *, release_name: str) -> bool:
+    if not result.success or not isinstance(result.data, dict):
+        return False
+    pending: list[Any] = [result.data]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, list):
+            pending.extend(current)
+            continue
+        if not isinstance(current, dict):
+            continue
+        name = str(current.get("name") or current.get("release_name") or "").strip()
+        info = current.get("info") if isinstance(current.get("info"), dict) else {}
+        status = str(current.get("status") or info.get("status") or "").strip().lower()
+        if name == release_name and status == "deployed":
+            return True
+        pending.extend(value for value in current.values() if isinstance(value, (dict, list)))
+    return False
+
+
 def _matching_continue_instruction(
     step: ExecutionStep,
     instructions: list[ExternalInstruction],
@@ -416,8 +511,13 @@ def _resource_refs(
     step: ExecutionStep,
     manifests: list[dict[str, Any]],
     target_namespace: str,
+    *,
+    excluded_kinds: set[str] | None = None,
 ) -> list[ResourceRef]:
-    refs = list(step.resource_refs)
+    excluded = excluded_kinds or set()
+    refs = [
+        ref for ref in step.resource_refs if str(ref.kind or "").strip().lower() not in excluded
+    ]
     for manifest in manifests:
         metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
         refs.append(
@@ -440,6 +540,24 @@ def _resource_refs(
             )
         )
     return refs
+
+
+def _manifest_kind(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("kind") or "").strip().lower()
+
+
+def _excluded_manifest_output(manifest: dict[str, Any]) -> dict[str, Any]:
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    return {
+        "server": "execution-agent",
+        "tool": "manifest.skip_excluded_kind",
+        "success": True,
+        "data": {
+            "kind": manifest.get("kind"),
+            "name": metadata.get("name"),
+            "reason": "excluded_by_configuration",
+        },
+    }
 
 
 def _mutation_record(action: str, *, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -481,9 +599,7 @@ def _parse_helm_command(command: str) -> tuple[str | None, str | None]:
     else:
         return None, None
     positional = [
-        part
-        for part in parts[index:]
-        if not part.startswith("-") and part not in {"true", "false"}
+        part for part in parts[index:] if not part.startswith("-") and part not in {"true", "false"}
     ]
     if len(positional) < 2:
         return None, None
